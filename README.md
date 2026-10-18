@@ -10,8 +10,8 @@ It is a port of FormantSynth, a VST3 plugin, to the FM-1's chip, and is built on
 [Dinghy](https://github.com/zvenson/dinghy) by zvenson.
 
 > **Status: prototype, runs on the FM-1.** Tested on the device: the sound engine, all knobs, both LFOs, the
-> sequencer and its LEDs, the pattern kept in flash. The firmware still calls itself "DINGHY" on screen and in the
-> installer; its own name and package identity come later.
+> sequencer and its LEDs, the pattern kept in flash. The package identity is still
+> Dinghy's (`FM-1_990`); its own comes before the first release.
 
 ## The sound
 
@@ -123,8 +123,8 @@ the [FM-1 Firmware Hub](https://fm1.designburgapps.com) in Chrome or Edge.
 Build it, then install over USB:
 
 ```sh
-./build.sh                                       # -> build/dinghy.fwsc
-python3 tools/fm1_install.py build/dinghy.fwsc   # asks before it writes, then restarts into the new build
+./build.sh                                       # -> build/fmlarynx.fwsc
+python3 tools/fm1_install.py build/fmlarynx.fwsc   # asks before it writes, then restarts into the new build
 python3 tools/fm1_install.py --info              # what runs on the connected FM-1
 ```
 
