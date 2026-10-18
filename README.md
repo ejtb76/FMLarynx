@@ -1,128 +1,165 @@
-<p align="center"><img src="assets/logo.svg" width="96" alt="Dinghy"></p>
+# FMLarynx
 
-# Dinghy
+**A formant synthesizer firmware for the M-VAVE FM-1.**
 
-**The smallest firmware for the M-VAVE FM-1 to build your own on.**
+FMLarynx turns the FM-1 into a monophonic "talking" synth: a sawtooth is shaped by a filter modelled on the human
+vocal tract, so each note sounds like a sung vowel. You glide between vowels with two encoders, wobble them with two
+LFOs, and play it from the keys, over USB-MIDI, or from a built-in 303-style 16-step sequencer with slides.
 
-Dinghy plays a sine wave on the keys, and that is all it does. Under it is everything an FM-1 firmware needs
-before it can be any fun: the update path, the USB rescue, USB-MIDI, USB audio, the keys, knobs and LEDs, the
-screen and a place to keep settings. It all works, so you start with the part you actually want to write.
+It is a port of FormantSynth, a VST3 plugin, to the FM-1's chip, and is built on
+[Dinghy](https://github.com/zvenson/dinghy) by zvenson.
 
-```
-firmware/src/dinghy.c     <- your firmware: ~200 lines, a 4-voice sine. Start here.
-firmware/src/platform.c   <- the plumbing (boot, USB, updates, audio ISR, settings). Done; read it, don't fight it.
-firmware/src/*.c, hal/    <- Felucca's platform, as SLOOP carries it, unchanged
-```
+> **Status: prototype, runs on the FM-1.** Tested on the device: the sound engine, all knobs, both LFOs, the
+> sequencer and its LEDs, the pattern kept in flash. The firmware still calls itself "DINGHY" on screen and in the
+> installer; its own name and package identity come later.
 
-Dinghy is based on [Felucca](https://github.com/hugelton/Felucca) by Leo Kuroshita (Hügelton Instruments), with its
-platform as [SLOOP](https://github.com/isod89/sloop-fm1) (isod89) carries it: it keeps that platform and throws away the
-rest. The smallest boat of the family, after the felucca and the sloop.
+## The sound
 
-<p align="center"><img src="docs/screen.png" width="240" alt="Dinghy's screen: the name, the note played, a keyboard with the keys that sound"></p>
+One voice, three formants:
 
-> **Status: 0.3, runs on the FM-1.** Tested on the device: the install, MIDI in (pitch exact, 4 voices), USB audio
-> at 44.1 / 48 kHz, the keys, the screen, the octave kept in flash, and back to another firmware through the hub.
+- **Source:** a sawtooth, harmonically rich, with a short attack (~5 ms) and release (~45 ms).
+- **Filter:** three resonant band-pass filters in parallel, tuned to the first three formants (F1, F2, F3) of a vowel.
+- **Vowel plane:** the five vowels **i, e, a, o, u** sit on an X/Y plane. Anywhere between them, the formant
+  frequencies blend smoothly, so turning X and Y morphs one vowel into the next.
 
-## What you get
+  ```
+  Y
+  1.0          a
+  0.5    e           o
+  0.0    i           u
+        0.0   0.5   1.0  X
+  ```
 
-| | |
+- **Voice:** moves the formants from an adult male vocal tract to a female/child one.
+- **Size:** scales all formants up or down (0.5x to 2x), from a giant's throat to a tiny one.
+- **Resonance:** how narrow and ringing the formants are. Output is compensated so the volume stays roughly level as
+  you turn it up.
+
+Everything runs in integer maths (the chip has no FPU); the audio routine uses well under its time budget.
+
+## Controls
+
+No menus: every parameter has its own encoder, and the **LFO** button turns knobs 1 to 4 into the LFO controls for
+as long as you hold it.
+
+### Encoders
+
+| Control | Normally | While holding **LFO** | Range |
+| --- | --- | --- | --- |
+| **KNOB 1** | Size | LFO X rate | 500 to 2000 (0.5x to 2x) / 0 to 1000 (0 to 8 Hz) |
+| **KNOB 2** | Resonance | LFO X depth | 10 to 500 (Q 1 to 50) / 0 to 1000 |
+| **KNOB 3** | Voice (male to female/child) | LFO Y rate | 0 to 1000 / 0 to 1000 (0 to 8 Hz) |
+| **KNOB 4** | Level | LFO Y depth | 0 to 1000 / 0 to 1000 |
+| **ALGORITHM** | Vowel X | | 0 to 1000 |
+| **SELECT** | Vowel Y (see the sequencer for its other jobs) | | 0 to 1000 |
+| **PRESETS** | Jump to a vowel: i, e, a, o, u | | |
+| **MASTER** | Volume | | |
+
+LFO X moves the vowel along X, LFO Y along Y, each around where the encoders put it. The screen shows the name and
+value of the last control you turned.
+
+### Buttons and keys
+
+| Control | What it does |
 | --- | --- |
-| **Updates that always work** | `tools/fm1_install.py`, the web installers and the [FM-1 Firmware Hub](https://fm1.designburgapps.com) reach your firmware over USB, so you (and your users) can always install the next build, or go back to the official firmware. |
-| **USB rescue** | Hold **OCT-** while switching on: no sound, only the updater. If your firmware crashes twice at boot, the FM-1 goes there by itself. |
-| **USB-MIDI** | In and out, class compliant: `midi_get()`, `midi_send()`. |
-| **USB audio** | The FM-1 shows up as a 16-bit stereo audio input (44.1 or 48 kHz): record it into any DAW or phone. Nothing to do. |
-| **Panel** | 27 keys, 14 buttons, 7 encoders, the MASTER knob, the LEDs, by name (`BTN_PLAY`, `ENC_KNOB1`, ...). |
-| **Screen** | 240 x 240, text in two sizes, rectangles, lines, pixels. |
-| **Settings** | `settings_load()` / `settings_save()`: up to 256 bytes with a CRC in their own flash sector. |
-| **A crash screen** | A fault shows where it happened (the PC), then the FM-1 restarts. |
-| **Host mode** | The same `dinghy.c` on your computer: the screen as an image, the sound as a WAV. No FM-1 needed to try an idea. |
-| **Checks** | The build fails on what bricks or breaks an FM-1 firmware: a 64-bit division, a call into the chip ROM, too much RAM, a register touched outside `hal/`. |
+| **Keys** | Play the voice (27 keys, F3 to G5 at octave 0). Monophonic: the last note played wins. |
+| **OCT- / OCT+** | Octave, -2 to +2. The button lights when you're off centre. |
+| **LFO** | Hold to set the LFOs with knobs 1 to 4. Glows softly as a reminder, lights up while held. |
+| **REC** | Sequencer record mode on/off. |
+| **PLAY** | Start/stop the sequencer. |
+| **GLO** | Hold while recording a step to make it a slide. |
+| **SEQ** | Hold and turn **SELECT** to set the tempo. |
 
-## Build your own
+## Sequencer
 
-From nothing to your own firmware on the FM-1, step by step. Each step works before you go to the next.
+A 16-step pattern sequencer in the spirit of the TB-303, so both hands are free for the knobs while it plays.
+Each step is a 16th note.
 
-### 1. Copy it
+**Recording a pattern**
 
-On GitHub: **Use this template** (top right on this page) or fork it, then clone your copy. Rename nothing yet:
-first make sure the unchanged Dinghy builds on your machine.
+1. Press **REC**. Playback stops and the cursor goes to step 1. The 16 white keys now show the 16 steps.
+2. Turn **SELECT** to move the cursor to a step.
+3. Press a key: its note goes into that step and the cursor moves on to the next one. Hold **GLO** while pressing
+   the key to make that step a slide.
+4. Press **REC** again to leave record mode.
 
-### 2. Set up once
+You hear every note as you enter it. A step without a note is a rest. To change a step, move the cursor to it and
+record over it.
 
-You need Linux on x86-64 (or macOS / Windows with Docker or WSL), Python 3 with Pillow, the JieLi toolchain
-and three files of the JieLi AC79 SDK:
+**Slides:** a slide step changes pitch without restarting the envelope, so it glides legato out of the step before
+it. Other steps retrigger the note.
+
+**The lights in record mode**
+
+| White key | Means |
+| --- | --- |
+| Off | Empty step (a rest) |
+| Soft | The cursor |
+| Medium | A step with a note in it |
+| Full | The note sounding right now |
+| **GLO** button full | The step under the cursor is a slide (it glows softly otherwise) |
+
+**Playing:** press **PLAY**. Hold **SEQ** and turn **SELECT** to set the tempo (40 to 300 BPM, 120 by default).
+
+**MIDI clock:** when a DAW or another device sends MIDI clock over USB, the sequencer follows it, and MIDI
+start, stop and continue start and stop it. If the clock stops for half a second, it carries on at its own tempo.
+
+**Saved:** the pattern, the tempo and the octave are kept in flash and come back after power-off. They are saved two
+seconds after your last change, once nothing is sounding, because writing to flash briefly interrupts the sound. Stop
+the sequencer for a moment before you switch off, so your last changes are saved.
+
+## MIDI and audio over USB
+
+- **MIDI in:** notes on any channel play the voice, with velocity. MIDI clock drives the sequencer.
+- **MIDI out:** notes from the keys and from the sequencer.
+- **Audio:** the FM-1 shows up as a 16-bit stereo audio input (44.1 or 48 kHz), so you can record it straight into
+  a DAW.
+
+## Installing
+
+Installing custom firmware is at your own risk. You can always go back to the official firmware or another one with
+the [FM-1 Firmware Hub](https://fm1.designburgapps.com) in Chrome or Edge.
+
+Build it, then install over USB:
+
+```sh
+./build.sh                                       # -> build/dinghy.fwsc
+python3 tools/fm1_install.py build/dinghy.fwsc   # asks before it writes, then restarts into the new build
+python3 tools/fm1_install.py --info              # what runs on the connected FM-1
+```
+
+The build needs Linux on x86-64 (or Windows with WSL, or macOS with Docker), Python 3 with Pillow, the JieLi
+toolchain and three files of the JieLi AC79 SDK:
 
 ```sh
 pip3 install Pillow mido python-rtmidi
-tools/get_toolchain.sh                      # JieLi's clang for the chip, to ~/.jieli/toolchain
+tools/get_toolchain.sh                           # JieLi's clang for the chip, to ~/.jieli/toolchain
 git clone --depth 1 --branch AC79NN_SDK_V1.2.1_2023-12-13 \
     https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git ~/fw-AC79_AIoT_SDK
 ```
 
-On macOS the build runs the toolchain in a `linux/amd64` Docker container by itself (have Docker running).
-`JIELI_TOOLCHAIN` and `AC79_SDK` point elsewhere if your copies live somewhere else.
+`tests/run_host.sh` runs the same firmware on your computer, writing the sound to a WAV and the screen to images.
 
-### 3. Hear it without an FM-1
+**If something goes wrong:** hold **OCT-** while switching on to reach the USB rescue mode (no sound, only the
+updater), and install a working build from there. If the firmware crashes twice at boot, the FM-1 goes there by
+itself.
 
-```sh
-tests/run_host.sh                           # -> build/host/dinghy.wav and screen PNGs
-```
+## For developers
 
-Host mode runs the same `dinghy.c` on your computer: the sound as a WAV, the screen as images. Most ideas can be
-tried here first, in seconds.
+The whole synth is in [firmware/src/dinghy.c](firmware/src/dinghy.c). Everything underneath it (boot, USB, updates,
+the audio interrupt, settings) is Dinghy's platform: see [docs/API.md](docs/API.md) for what it offers and
+[docs/RULES.md](docs/RULES.md) for the chip's rules (no FPU, no 64-bit division, the audio time budget), which the
+build checks for you.
 
-### 4. Your first change
+## License and credits
 
-Open [firmware/src/dinghy.c](firmware/src/dinghy.c) (~200 lines). The sound is `app_audio()`: it gets an empty
-buffer of stereo frames and adds to it. Make the sine a square:
+GPL-3.0-only: you may change and share it, and whoever gets a firmware built from it gets its source too. Details
+and third-party parts in [LICENSING.md](LICENSING.md).
 
-```c
-s = ((int32_t)ph < 0 ? 8000 : -8000) * amp >> 15;     /* instead of s = (sine(ph) * amp) >> 15; */
-```
+- **FMLarynx** (the formant synth, sequencer and controls in `dinghy.c`): Erik Jan ten Brinke
+- **[Dinghy](https://github.com/zvenson/dinghy)** (the app skeleton, the wiring `platform.c`, host mode, docs): zvenson
+- **The platform:** Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
+  ([Felucca](https://github.com/hugelton/Felucca)), with the changes of [SLOOP](https://github.com/isod89/sloop-fm1)
+  (isod89)
 
-Run `tests/run_host.sh` again and listen to `build/host/dinghy.wav`. The screen is drawn in `app_main()`, the keys
-are read there too: change the text, add a knob ([docs/API.md](docs/API.md) has every call).
-
-### 5. Onto the FM-1
-
-```sh
-./build.sh                                       # -> build/dinghy.fwsc (fails on what would brick the FM-1)
-python3 tools/fm1_install.py build/dinghy.fwsc   # over USB; asks before it writes, restarts into your build
-python3 tools/fm1_install.py --info              # what runs on the connected FM-1
-```
-
-That is the whole loop: change, hear it on the host, build, install. Back to another firmware, or to the official
-one, with the [FM-1 Firmware Hub](https://fm1.designburgapps.com) in Chrome or Edge: Dinghy (and every copy of it)
-answers the hub's updater like every firmware there. Installing firmware is at your own risk.
-
-### 6. When it goes wrong
-
-- **It crashes:** the screen shows where (the PC), then the FM-1 restarts. Twice at boot and it goes to the
-  USB rescue by itself.
-- **It won't start at all:** hold **OCT-** while switching on: the USB rescue, no sound, only the updater. Install
-  a working build (or another firmware from the hub) from there.
-- **The build refuses:** it checks for a 64-bit division, a call into the chip ROM, too much RAM, a register touched
-  outside `hal/`. [docs/RULES.md](docs/RULES.md) says why each one matters; read it before your first crash.
-
-### 7. Make it yours, release it, get into the hub
-
-Your name and logo, your own package identity (so the FM-1 and the installers tell your firmware from Dinghy),
-a GitHub release with the `.fwsc`, and how to get listed next to the others in the
-[FM-1 Firmware Hub](https://fm1.designburgapps.com): **[docs/MAKE-IT-YOURS.md](docs/MAKE-IT-YOURS.md)**.
-
-## Where to go next
-
-- **[docs/API.md](docs/API.md)**: everything `platform.c` gives you, with the panel's ids, the screen calls, the
-  audio contract, MIDI, settings, the flash map, timing.
-- **[docs/MAKE-IT-YOURS.md](docs/MAKE-IT-YOURS.md)**: turn Dinghy into your firmware: the name, the package
-  identity, releases, getting into the FM-1 Firmware Hub.
-- **[docs/RULES.md](docs/RULES.md)**: the chip's rules (no FPU, no libgcc, the audio ISR's budget) and what the build
-  checks for you. Read it before your first crash, not after.
-
-## License
-
-GPL-3.0-only, as Felucca and SLOOP: you may change and share it, and whoever gets your firmware gets its source.
-Details, credits and third-party parts in [LICENSING.md](LICENSING.md).
-
-The platform is Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments, with SLOOP's changes (isod89).
-Dinghy (the app, the host mode, the docs) by zvenson.
+"M-VAVE" and "FM-1" belong to their owners. FMLarynx is not made or endorsed by them.
