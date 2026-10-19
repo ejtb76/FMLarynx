@@ -34,26 +34,34 @@ One voice, three formants:
 - **Size:** scales all formants up or down (0.5x to 2x), from a giant's throat to a tiny one.
 - **Resonance:** how narrow and ringing the formants are. Output is compensated so the volume stays roughly level as
   you turn it up.
+- **Cutoff:** a low-pass filter after the formants (12 dB/octave), from 60 Hz to fully open.
+- **Envelope (TB-303 style):** every new note restarts it. **Env Mod** sets how far it opens the cutoff (up to 4
+  octaves) and the formant size (up to 2x); **Decay** how fast it closes again. **Amp Decay** lets the volume die
+  away too.
+- **Accent:** an accented note is louder, and briefly raises the resonance and pulls the vowel towards "a".
 
 Everything runs in integer maths (the chip has no FPU); the audio routine uses well under its time budget.
 
 ## Controls
 
-No menus: every parameter has its own encoder, and the **LFO** button turns knobs 1 to 4 into the LFO controls for
-as long as you hold it.
+No menus: every parameter has its own encoder. The **LFO** and **ENV** buttons turn knobs 1 to 4 into the LFO or
+the envelope controls for as long as you hold them.
 
 ### Encoders
 
-| Control | Normally | While holding **LFO** | Range |
+| Control | Normally | While holding **LFO** | While holding **ENV** |
 | --- | --- | --- | --- |
-| **KNOB 1** | Size | LFO X rate | 500 to 2000 (0.5x to 2x) / 0 to 1000 (0 to 8 Hz) |
-| **KNOB 2** | Resonance | LFO X depth | 10 to 500 (Q 1 to 50) / 0 to 1000 |
-| **KNOB 3** | Voice (male to female/child) | LFO Y rate | 0 to 1000 / 0 to 1000 (0 to 8 Hz) |
-| **KNOB 4** | Level | LFO Y depth | 0 to 1000 / 0 to 1000 |
-| **ALGORITHM** | Vowel X | | 0 to 1000 |
-| **SELECT** | Vowel Y (see the sequencer for its other jobs) | | 0 to 1000 |
+| **KNOB 1** | Size, 500 to 2000 (0.5x to 2x) | LFO X rate, 0 to 1000 (0 to 8 Hz) | Decay, 0 to 1000 (30 ms to 2 s) |
+| **KNOB 2** | Resonance, 10 to 500 (Q 1 to 50) | LFO X depth, 0 to 1000 | Env Mod, 0 to 1000 |
+| **KNOB 3** | Voice, 0 to 1000 (male to female/child) | LFO Y rate, 0 to 1000 (0 to 8 Hz) | Accent amount, 0 to 1000 |
+| **KNOB 4** | Cutoff, 0 to 1000 (60 Hz to open) | LFO Y depth, 0 to 1000 | Amp Decay, 0 to 1000 (30 ms to 2 s; 1000 holds) |
+| **ALGORITHM** | Vowel X, 0 to 1000 | | |
+| **SELECT** | Vowel Y, 0 to 1000 (see the sequencer for its other jobs) | | |
 | **PRESETS** | Jump to a vowel: i, e, a, o, u | | |
 | **MASTER** | Volume | | |
+
+At power-on: Cutoff open, Env Mod 0, Decay 500, Accent 1000, Amp Decay 1000, so the envelope is out of the way
+until you dial it in.
 
 LFO X moves the vowel along X, LFO Y along Y, each around where the encoders put it. The screen shows the name and
 value of the last control you turned.
@@ -65,9 +73,10 @@ value of the last control you turned.
 | **Keys** | Play the voice (27 keys, F3 to G5 at octave 0). Monophonic: the last note played wins. |
 | **OCT- / OCT+** | Octave, -2 to +2. The button lights when you're off centre. |
 | **LFO** | Hold to set the LFOs with knobs 1 to 4. Glows softly as a reminder, lights up while held. |
+| **ENV** | Hold to set the envelope with knobs 1 to 4; glows softly, lights up while held. In record mode it also marks accents. |
 | **REC** | Sequencer record mode on/off. |
 | **PLAY** | Start/stop the sequencer. |
-| **GLO** | Hold while recording a step to make it a slide. |
+| **GLO** | In record mode: marks slides (it only glows there). |
 | **SEQ** | Hold and turn **SELECT** to set the tempo. |
 
 ## Sequencer
@@ -79,15 +88,22 @@ Each step is a 16th note.
 
 1. Press **REC**. Playback stops and the cursor goes to step 1. The 16 white keys now show the 16 steps.
 2. Turn **SELECT** to move the cursor to a step.
-3. Press a key: its note goes into that step and the cursor moves on to the next one. Hold **GLO** while pressing
-   the key to make that step a slide.
+3. Press a key: its note goes into that step and the cursor moves on to the next one. Hold **GLO** and/or **ENV**
+   while pressing the key to make that step a slide and/or an accent.
 4. Press **REC** again to leave record mode.
 
 You hear every note as you enter it. A step without a note is a rest. To change a step, move the cursor to it and
-record over it.
+record over it. To add or remove a slide or accent afterwards, move the cursor to the step and tap **GLO** or
+**ENV** on its own: it toggles on release, and only if you didn't press a key or turn SELECT while holding it.
 
-**Slides:** a slide step changes pitch without restarting the envelope, so it glides legato out of the step before
-it. Other steps retrigger the note.
+**Notes and slides, as on a 303:** a note sounds for half its step, then lets go. A slide on a step holds its note
+into the next step, which then glides there in pitch (in ~50 ms) without restarting the envelope.
+
+**Accents:** louder, with a short burst of resonance and a vowel shift towards "a"; **ENV** + KNOB 3 sets how much.
+
+**On the screen:** a strip of 16 cells above the keyboard shows the pattern, each cell over its own white key:
+dark = rest, grey = a note, lilac = an accented note, a bar running into the next cell = a slide, and a white tick
+under the cursor (record mode) or under the step that is playing.
 
 **The lights in record mode**
 
@@ -97,7 +113,9 @@ it. Other steps retrigger the note.
 | Soft | The cursor |
 | Medium | A step with a note in it |
 | Full | The note sounding right now |
-| **GLO** button full | The step under the cursor is a slide (it glows softly otherwise) |
+| **GLO** / **ENV** full | The step under the cursor is a slide / an accent |
+
+While the pattern plays, **GLO** and **ENV** light up on every step that has a slide or an accent.
 
 **Playing:** press **PLAY**. Hold **SEQ** and turn **SELECT** to set the tempo (40 to 300 BPM, 120 by default).
 

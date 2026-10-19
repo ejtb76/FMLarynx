@@ -21,7 +21,10 @@
  * exactly; play()/stop()/quiet()/app_main() below are unchanged and already generic over NV. */
 #define NV 1u                                   /* voices: monophonic, like the real plugin */
 static struct {
-    volatile uint32_t inc;                      /* phase step per frame: f * 2^32 / 44100 */
+    volatile uint32_t inc;                      /* phase step per frame: f * 2^32 / 44100 -- written by
+                                                  * app_audio() only, which moves it to tgt */
+    volatile uint32_t tgt;                      /* the pitch play() asks for, same units */
+    volatile int32_t glide;                     /* 0: inc jumps to tgt; 1: glides there (a 303 slide) */
     volatile int32_t gate;                      /* target level, Q15: 0 = released */
     volatile int32_t amp;                       /* the level now: glides to gate, no clicks -- volatile
                                                   * since the sequencer (app_main) now also resets it
@@ -121,6 +124,15 @@ static int32_t mFreq[NB] = {-1, -1, -1};        /* smoothed centre freq per band
 static int32_t fz1x[NB], fz2x[NB], fz1y[NB], fz2y[NB];   /* x[n-1], x[n-2], y[n-1], y[n-2] per band */
 static uint32_t lfoXPh, lfoYPh;                 /* LFO phase, advanced once per block (control rate) */
 
+/* Accent (TB-303 / MC-202 style, per sequencer step): seq_trigger() sets accent_env to full, and it
+ * decays once per block (~200 ms). While it is up it raises the resonance (up to 2x Q) and pulls the
+ * vowel halfway towards "a" (the most open one), on top of the louder velocity -- a short "quack".
+ * Written by the main loop, read and decayed by the audio ISR: a plain int32 store is atomic here. */
+static volatile int32_t accent_env;             /* Q15: 32767 = just triggered, 0 = no accent */
+static int32_t res_eff = 80;                    /* resx10 with the accent applied; set per block by
+                                                  * formant_update_coeffs(), read by app_audio() for the
+                                                  * resonance compensation */
+
 /* knob-driven parameters -- pm = permille (0..1000 == the float plugin's 0.0..1.0), chosen so
  * every encoder click is a plain add/sub with no extra scaling at the UI layer. */
 static struct {
@@ -128,24 +140,56 @@ static struct {
     int32_t size;                                /* 500..2000 == 0.5x..2.0x */
     int32_t resx10;                              /* Q*10, 10..500 == Q 1.0..50.0 */
     int32_t voice;                               /* pm, 0 = male .. 1000 = female/child */
-    int32_t level;                                /* pm */
+    int32_t cutoff;                               /* pm: the low-pass after the formants, 60 Hz .. open
+                                                   * (1000 = off); Env Mod opens it further */
     int32_t lfoXRate, lfoXDepth, lfoYRate, lfoYDepth;   /* rate: pm (0..8 Hz); depth: pm of the x/y range */
-} par = {500, 500, 1000, 80, 0, 1000, 0, 0, 0, 0};
+    int32_t decay, envmod, accent, ampdec;      /* the 303's envelope knobs (under BTN_ENV), all pm:
+                                                  * decay 30 ms..2 s; envmod how far the envelope opens
+                                                  * Size (up to 2x); accent scales the accent; ampdec the
+                                                  * volume's decay, 1000 = none (holds, as before) */
+} par = {500, 500, 1000, 80, 0, 1000, 0, 0, 0, 0, 500, 0, 1000, 1000};
+
+/* The envelope (TB-303 style): every new note (not a slide, which carries on) restarts it at full;
+ * it decays once per block, mod_env opening Size by envmod, amp_env fading the volume. play()
+ * raises env_trig, app_audio() restarts both: the ISR alone writes the envelopes, no race. */
+static volatile int32_t env_trig;
+static int32_t mod_env, amp_env = 32767;        /* Q15 */
+static const int32_t decay_q15[21] = {          /* per-block (5.8 ms) factor, Q15, for time constants
+                                                  * 30 ms * (2000/30)^(i/20): 30 ms .. 2 s, exponential
+                                                  * so the knob feels even -- precomputed offline */
+    27003, 28011, 28856, 29559, 30142, 30622, 31018, 31342, 31607, 31824,
+    32001, 32145, 32262, 32357, 32434, 32497, 32548, 32590, 32624, 32651, 32673,
+};
+static int32_t decay_coef(int32_t pm)           /* pm 0..1000 -> the factor, interpolated */
+{
+    int32_t i = pm / 50, f = pm % 50;
+    if (i >= 20) return decay_q15[20];
+    return decay_q15[i] + (decay_q15[i + 1] - decay_q15[i]) * f / 50;
+}
 
 static void formant_update_coeffs(int32_t cb0[NB], int32_t cb2[NB], int32_t ca1[NB], int32_t ca2[NB])
 {
     int32_t lfoX = (sine(lfoXPh) * par.lfoXDepth) / 32767;    /* -depth..depth, pm */
     int32_t lfoY = (sine(lfoYPh) * par.lfoYDepth) / 32767;
     int32_t x = par.x + lfoX, y = par.y + lfoY, target[NB];
+    int32_t acc = accent_env * par.accent / 1000;          /* the Accent knob scales all of it */
+    int32_t sz = par.size + ((par.size * par.envmod / 1000) * mod_env >> 15);   /* Env Mod: up to 2x */
     uint32_t b;
     x = x < 0 ? 0 : x > 1000 ? 1000 : x;
     y = y < 0 ? 0 : y > 1000 ? 1000 : y;
     lfoXPh += par.lfoXRate * 199458u;           /* rate pm -> phase step per block, 0..8 Hz */
     lfoYPh += par.lfoYRate * 199458u;
 
+    x += ((vowel_x[2] - x) * acc) >> 16;        /* accent: halfway to "a" at full (>> 16 = * acc/2) */
+    y += ((vowel_y[2] - y) * acc) >> 16;
+    res_eff = par.resx10 + ((par.resx10 * acc) >> 15);        /* accent: up to 2x Q */
+    if (res_eff > 500) res_eff = 500;
+    accent_env = (accent_env * 31830) >> 15;    /* decay per 5.8 ms block: e^(-5.8/200) -> ~200 ms */
+    mod_env = (mod_env * decay_coef(par.decay)) >> 15;
+
     vowel_freqs(x, y, par.voice, target);
     for (b = 0; b < NB; b++) {
-        int32_t f = (target[b] * par.size) / 1000, fc, turns_q16, sw, cw, alpha, a0;
+        int32_t f = (target[b] * sz) / 1000, fc, turns_q16, sw, cw, alpha, a0;
         uint32_t ph0;
         if (f < 20) f = 20; else if (f > 19845) f = 19845;    /* Nyquist guard, 0.45 * 44100 */
         if (mFreq[b] < 0) mFreq[b] = f;                        /* snap on the very first block */
@@ -159,7 +203,7 @@ static void formant_update_coeffs(int32_t cb0[NB], int32_t cb2[NB], int32_t ca1[
         sw = sine(ph0);                                        /* sin(w0), Q15 */
         cw = sine(ph0 + (1u << 30));                           /* cos(w0): a quarter turn ahead */
 
-        alpha = (sw * 5) / par.resx10;                         /* sin(w0) / (2*Q), Q15 */
+        alpha = (sw * 5) / res_eff;                            /* sin(w0) / (2*Q), Q15 */
         a0 = 32768 + alpha;                                    /* 1 + alpha, Q15 */
         {
             int32_t ratio = (alpha << 15) / a0;                /* alpha/a0, Q15 -- one precise division;
@@ -211,20 +255,67 @@ static volatile uint32_t dbg_us_now, dbg_us_max;
 static void app_audio(int32_t *out, uint32_t n)
 {
     uint32_t i;
-    uint32_t ph = voice[0].ph, step = voice[0].inc;
+    uint32_t ph = voice[0].ph, step = voice[0].inc, tgt = voice[0].tgt;
     int32_t amp = voice[0].amp, g = voice[0].gate;
     int32_t cb0[NB], cb2[NB], ca1[NB], ca2[NB];
-    int32_t resGain;
+    int32_t resGain, rg, rg_step, ae, ae_step;
+    static int32_t rg_last = 256;               /* last block's resonance gain, Q8 */
+    static int32_t lp1, lp2, lk_last = 16384;   /* the Cutoff low-pass: state, last block's factor */
+    int32_t lk, lk_step;
 #ifndef DINGHY_HOST
     uint32_t t0 = fm1_ticks();
 #endif
-    if (!amp && !g)
-        return;                                 /* silent: costs nothing (filter state just holds,
-                                                   * LFOs and coefficients just don't update) */
+    if (!amp && !g) {                           /* released and faded out -- but the resonant filter
+                                                   * may still ring: run on until it has died away, or
+                                                   * freezing it mid-ring would cut the sound off with a
+                                                   * click, and the next note would restart that frozen
+                                                   * ring with a second one */
+        uint32_t b;
+        int32_t ring = 0;
+        for (b = 0; b < NB; b++) {
+            int32_t y1 = fz1y[b] < 0 ? -fz1y[b] : fz1y[b], y2 = fz2y[b] < 0 ? -fz2y[b] : fz2y[b];
+            if (y1 > 2 || y2 > 2) ring = 1;
+        }
+        if (lp2 > 2 || lp2 < -2) ring = 1;
+        if (!ring) {                            /* silent: costs nothing; start the next note from rest */
+            for (b = 0; b < NB; b++) fz1x[b] = fz2x[b] = fz1y[b] = fz2y[b] = 0;
+            lp1 = lp2 = 0;
+            return;
+        }
+    }
+    ae = amp_env;                                /* Amp Decay: a ramp across the block from where it
+                                                   * was, so a restart fades up instead of jumping */
+    if (env_trig) { env_trig = 0; mod_env = 32767; amp_env = 32767; }   /* a new note: restart */
+    if (par.ampdec < 1000) amp_env = (amp_env * decay_coef(par.ampdec)) >> 15;
+    ae_step = (amp_env - ae) / (int32_t)n;
     formant_update_coeffs(cb0, cb2, ca1, ca2);   /* control rate: once per 256-frame block */
-    resGain = res_gain_q8[par.resx10 / 10];      /* resonance volume compensation, see the table above */
+    resGain = res_gain_q8[res_eff / 10];         /* resonance volume compensation, see the table above */
+    rg = rg_last << 8;                           /* ramped across the block too (Q16): an accent's Q
+                                                   * jump would otherwise step the output gain at once */
+    rg_step = ((resGain - rg_last) << 8) / (int32_t)n;
+    rg_last = resGain;
+    {                                            /* Cutoff (TB-303 style): log2 Hz in Q8, 60 Hz (1512)
+                                                   * .. 18 kHz across the knob, Env Mod adding up to 4
+                                                   * octaves (1024); from ~16 kHz up the filter is off */
+        int32_t l2 = 1512 + par.cutoff * 2107 / 1000 + ((par.envmod * 1024 / 1000) * mod_env >> 15);
+        int32_t k = 16384;                       /* Q14: 1 = passes everything */
+        if (l2 < 3584) {
+            int32_t w = exp2_fixed(l2) * 4669 / 1000;   /* 2 pi fc / fs, Q15 */
+            k = (w << 14) / (32768 + w);         /* one-pole factor w / (1 + w), stays below 1 */
+        }
+        lk = lk_last << 8;                       /* ramped across the block like rg */
+        lk_step = ((k - lk_last) << 8) / (int32_t)n;
+        lk_last = k;
+    }
+    if (!voice[0].glide) step = tgt;
     for (i = 0; i < n; i++) {
         int32_t saw, s;
+        if (step != tgt) {                       /* slide: one-pole towards tgt, ~12 ms time constant
+                                                   * (2^9 frames), on pitch in ~50 ms like a 303; the
+                                                   * difference of two pitches here always fits an int32 */
+            int32_t d = (int32_t)(tgt - step) >> 9;
+            step = d ? step + (uint32_t)d : tgt;
+        }
         if (amp < g) { amp += 48; if (amp > g) amp = g; }        /* attack ~5 ms */
         else if (amp > g) { amp -= 6; if (amp < g) amp = g; }    /* release ~45 ms */
         ph += step;
@@ -233,12 +324,21 @@ static void app_audio(int32_t *out, uint32_t n)
                                                    * wouldn't show off formant filtering at all */
         saw = (saw * amp) >> 15;                /* envelope the excitation, then resonate it */
         s = formant(saw, cb0, cb2, ca1, ca2);
-        s = (s * resGain) >> 8;                 /* resonance compensation */
-        s = (s * par.level) / 1000;             /* the Level knob, pm */
+        lp1 += ((s - lp1) * (lk >> 8)) >> 14;   /* Cutoff: two one-poles, 12 dB/octave; |s| <= 32767
+                                                   * here, so the products fit an int32 in Q14 */
+        lp2 += ((lp1 - lp2) * (lk >> 8)) >> 14;
+        lk += lk_step;
+        s = lp2;
+        s = (s * (rg >> 8)) >> 8;               /* resonance compensation */
+        rg += rg_step;
+        s = (s * (ae >> 3)) >> 12;              /* Amp Decay; ae in Q12 here: s can reach ~150000 after
+                                                  * the resonance gain, and that times Q15 overflows */
+        ae += ae_step;
         out[2u * i] += s;                       /* L */
         out[2u * i + 1u] += s;                  /* R */
     }
     voice[0].ph = ph;
+    voice[0].inc = step;
     voice[0].amp = amp;
 #ifndef DINGHY_HOST
     dbg_us_now = (fm1_ticks() - t0) / FM1_TICKS_PER_US;
@@ -251,6 +351,8 @@ static const uint32_t INC_C9[12] = {            /* MIDI 120..131 (C9..B9); lower
     815363807u, 863847862u, 915214929u, 969636441u, 1027294024u, 1088380105u,
     1153098554u, 1221665363u, 1294309365u, 1371273005u, 1452813141u, 1539201906u};
 static uint32_t ages, last_note = 255;
+static int32_t glide_next;                     /* set around a play() call by the sequencer: glide to
+                                                  * the new note instead of jumping (a 303 slide) */
 
 static void play(uint32_t note, uint32_t vel)
 {
@@ -263,7 +365,9 @@ static void play(uint32_t note, uint32_t vel)
     }
     voice[pick].note = (uint8_t)note;
     voice[pick].age = ++ages;
-    voice[pick].inc = INC_C9[note % 12u] >> (10u - note / 12u);
+    voice[pick].glide = glide_next;              /* before tgt: the ISR never glides to a jump */
+    if (!glide_next) env_trig = 1;               /* a new note restarts the envelope; a slide carries on */
+    voice[pick].tgt = INC_C9[note % 12u] >> (10u - note / 12u);
     voice[pick].gate = (int32_t)(vel * 90u);    /* 127 -> 11430: conservative headroom before the formant filter */
     last_note = note;
 }
@@ -322,23 +426,61 @@ static void draw_keys(uint32_t lit)             /* bit k: key k sounds */
 
 /* ---- 16-step sequencer: BTN_REC toggles record (ENC_SELECT browses the 16 steps; a key records
  * its note into the cursor step and advances; hold BTN_GLO while pressing the key to mark that
- * step a slide -- no hard retrigger, just an immediate pitch change under a continuing envelope,
- * same idea as the real plugin's legato). BTN_PLAY runs the pattern; hold BTN_SEQ + ENC_SELECT
+ * step a slide -- it ties into the next step, which glides there, see seq_trigger()); hold BTN_ENV
+ * the same way to accent it (louder, plus the accent_env sweep above); a tap on either alone
+ * toggles it on the cursor step. BTN_PLAY runs the pattern; hold BTN_SEQ + ENC_SELECT
  * sets the tempo. The pattern and tempo live in `set` (app_main()) so they survive a power-off,
  * same as the octave. A step with no note recorded into it plays as a rest (silence). */
 #define NSTEP 16u
 
-struct seq_step_s { uint8_t note, flags; };     /* flags: bit0 active, bit1 slide */
+struct seq_step_s { uint8_t note, flags; };     /* flags: bit0 active, bit1 slide, bit2 accent -- a new
+                                                  * bit in the same byte, so `set` keeps its size and old
+                                                  * patterns load as they were (no accents) */
+
+/* As on a 303: a note sounds for half its step, then lets go (seq_release()); a slide step holds its
+ * note into the next step instead, which then glides there in pitch without restarting the envelope.
+ * So the slide bit on step N ties N to N+1 -- the bar draw_steps() runs into the next cell. */
+static uint32_t seq_note = 255;                 /* the note the sequencer holds, 255 = none */
+static int32_t seq_tie;                         /* that note's step was a slide: hold it into the next */
+
+static void seq_release(void)                   /* half a step after a note, unless it ties */
+{
+    if (seq_note < 128u && !seq_tie) {
+        stop(seq_note);                         /* stop() only touches the voice if it still plays
+                                                  * seq_note, so a key played live meanwhile stays */
+        midi_send(0x80, seq_note, 0);
+        seq_note = 255;
+    }
+}
+
+static void seq_halt(void)                      /* the sequencer stops: let go of everything */
+{
+    seq_tie = 0;
+    seq_release();
+}
 
 static void seq_trigger(const struct seq_step_s *s)   /* shared by the internal clock and MIDI clock */
 {
+    uint32_t prev = seq_note;
     if (s->flags & 1u) {
-        if (!(s->flags & 2u)) voice[0].amp = 0;        /* not a slide: hard retrigger */
-        play(s->note, 100);                             /* a slide just retunes under the still-running
-                                                          * envelope -- legato */
-        midi_send(0x90, s->note, 100);
+        uint32_t vel = s->flags & 4u ? 100u + 27u * (uint32_t)par.accent / 1000u : 100u;   /* accent: louder */
+        int32_t slide = seq_tie && prev < 128u;        /* the step before tied into this one */
+        if (!slide) voice[0].amp = 0;                  /* not a slide: hard retrigger */
+        if (s->flags & 4u) accent_env = 32767;
+        glide_next = slide;
+        play(s->note, vel);
+        glide_next = 0;
+        if (prev != s->note) {
+            midi_send(0x90, s->note, vel);
+            if (prev < 128u) midi_send(0x80, prev, 0);  /* after the new note-on: legato */
+        } else if (!slide) {
+            midi_send(0x80, prev, 0);                    /* same note again, retriggered */
+            midi_send(0x90, s->note, vel);
+        }                                                /* same note tied: it just goes on */
+        seq_note = s->note;
+        seq_tie = (s->flags & 2u) != 0;
     } else {
-        stop((uint32_t)voice[0].note);                   /* an empty step is a rest */
+        seq_halt();                                    /* an empty step is a rest, and ends a tie */
     }
 }
 
@@ -354,13 +496,35 @@ static uint32_t white_key_id(uint32_t n)        /* physical key index of the n-t
     return 0;
 }
 
+/* The pattern as a strip of 16 cells right above the keyboard drawing, each over its own white key
+ * (same x as draw_keys()): dark = rest, grey = a note, lilac = an accented note; a bar under a cell
+ * running into the next one = a slide (legato into the next step); a white tick under it = the
+ * record cursor, or the step sounding while the pattern plays (the two never show at once). */
+#define C_EMPTY RGB(45, 45, 45)
+static void draw_steps(const struct seq_step_s *step, int32_t mark)   /* mark: -1 = none */
+{
+    uint32_t n;
+    cv_begin(240, 24, C_BLACK);
+    for (n = 0; n < NSTEP; n++) {
+        int32_t x = 8 + (int32_t)n * 14;
+        uint32_t f = step[n].flags;
+        cv_rect(x, 0, 13, 15, !(f & 1u) ? C_EMPTY : f & 4u ? C_ACC : C_KEY);
+        if ((f & 3u) == 3u)
+            cv_rect(x, 17, n + 1u < NSTEP ? 14 : 13, 3, C_KEY);
+        if ((int32_t)n == mark)
+            cv_rect(x + 3, 21, 7, 3, C_WHITE);
+    }
+    cv_blit(0, 116);
+}
+
 #ifndef DINGHY_HOST                             /* fmt_int is in libc.c, only built for real hardware
                                                   * (tests/host.c stands in for platform.c on a computer
                                                   * and doesn't pull it in -- and the host build's
                                                   * fm1_enc_take() stub always returns 0 anyway, so
                                                   * touched_id would never leave its sentinel there) */
-static const char *const PNAME[] = {"SIZE", "RES", "VOICE", "LEVEL", "X", "Y",
-                                     "X RATE", "X DEPTH", "Y RATE", "Y DEPTH", "VOWEL", "BPM", "STEP"};
+static const char *const PNAME[] = {"SIZE", "RES", "VOICE", "CUTOFF", "X", "Y",
+                                     "X RATE", "X DEPTH", "Y RATE", "Y DEPTH", "VOWEL", "BPM", "STEP",
+                                     "DECAY", "ENV MOD", "ACCENT", "AMP DECAY"};
 static void draw_touched(uint32_t id, int32_t val)    /* last knob moved: name + value, replaces the
                                                         * static subtitle once anything has been touched */
 {
@@ -433,7 +597,7 @@ static void led_bg(uint32_t id, int on)         /* the third brightness layer (f
 }
 #endif
 
-/* ---- controls: 7 encoders, no menus -- ENC_KNOB1..4 do size/res/voice/level normally and the
+/* ---- controls: 7 encoders, no menus -- ENC_KNOB1..4 do size/res/voice/cutoff normally and the
  * 4 LFO params while BTN_LFO is held (a plain if on the button state every time a knob is read,
  * not a separate mode to enter/leave: release the button and the same encoder is back to its
  * normal job, same block). ENC_ALGORITHM/ENC_SELECT are direct X/Y; ENC_PRESETS jumps to a
@@ -459,9 +623,12 @@ static void app_main(void)
         struct seq_step_s step[NSTEP];
     } set = {0};
     uint32_t prev = 0, k, t_change = 0, dirty = 0, lit_drawn = ~0u, note_drawn = ~0u;
-    int32_t oct_drawn = 99;
+    uint32_t tap_pending = 0;                   /* GLO/ENV pressed, not yet used as a modifier */
+    int32_t oct_drawn = 99, mark_drawn = -2;
+    uint8_t flags_drawn[NSTEP] = {0};           /* what draw_steps() last showed; mark_drawn -2 forces
+                                                  * the first draw */
     int32_t rec_mode = 0, rec_step = 0, seq_running = 0, seq_step = 0;
-    uint32_t seq_next_ms = 0;
+    uint32_t seq_next_ms = 0, seq_off_ms = 0;  /* next step; when the note of this one lets go */
     uint32_t midiclk_last_ms = 0u - 1000u, midiclk_count = 0;   /* "ages ago": starts on the internal clock */
 #ifndef DINGHY_HOST
     uint32_t touched_id_drawn = ~0u;
@@ -482,9 +649,9 @@ static void app_main(void)
 #ifndef DINGHY_HOST
     led_dim(BTN_LFO, 1);                        /* soft glow, always -- fm1_led_key(BTN_LFO, ...) above
                                                   * goes full bright on top of it while held */
-    led_dim(BTN_GLO, 1);                        /* same: a landmark showing it's an available modifier;
-                                                  * goes full bright per-step while browsing in record
-                                                  * mode, see the rec_step tracking below */
+    led_dim(BTN_ENV, 1);                        /* same: always does something (the envelope knobs) */
+                                                /* BTN_GLO glows only in record mode, where it does
+                                                  * something: set per pass in the main loop below */
     fm1_led_bg_ns = 16000u;                     /* the shared pulse width for led_bg()'s middle tier --
                                                   * between led_dim()'s ~1/24 glow and a full LED; tune
                                                   * by eye if "filled step" isn't clearly distinct */
@@ -507,8 +674,10 @@ static void app_main(void)
                 midi_send(0x90, held[k], 100);
                 if (rec_mode) {                     /* record into the cursor step, then advance it */
                     set.step[rec_step].note = held[k];
-                    set.step[rec_step].flags = 1u | (fm1_in.buttons & (1u << BTN_GLO) ? 2u : 0u);
+                    set.step[rec_step].flags = (uint8_t)(1u | (fm1_in.buttons & (1u << BTN_GLO) ? 2u : 0u)
+                                                            | (fm1_in.buttons & (1u << BTN_ENV) ? 4u : 0u));
                     rec_step = (int32_t)((rec_step + 1) % (int32_t)NSTEP);
+                    tap_pending = 0;                /* GLO/ENV held through this: a modifier, not a tap */
                     dirty = 1; t_change = fm1_ms;
                     touched_id = 12; touched_val = rec_step;
                 }
@@ -519,9 +688,19 @@ static void app_main(void)
         b = fm1_input_edges(&rel);              /* buttons pressed since the last call (bit = button id) */
         if (b & (1u << BTN_OCT_DOWN) && set.oct > -2) { set.oct--; dirty = 1; t_change = fm1_ms; }
         if (b & (1u << BTN_OCT_UP) && set.oct < 2) { set.oct++; dirty = 1; t_change = fm1_ms; }
+        /* GLO/ENV tapped on their own in record mode toggle slide/accent on the cursor step (note and
+         * cursor unchanged). On release, not press: held while a key records or while SELECT moves the
+         * cursor, they are a modifier instead, and recording/moving cancels the toggle (tap_pending) */
+        tap_pending |= b & (1u << BTN_GLO | 1u << BTN_ENV);
+        if (rec_mode && (set.step[rec_step].flags & 1u) && (rel & tap_pending)) {
+            if (rel & tap_pending & (1u << BTN_GLO)) set.step[rec_step].flags ^= 2u;
+            if (rel & tap_pending & (1u << BTN_ENV)) set.step[rec_step].flags ^= 4u;
+            dirty = 1; t_change = fm1_ms;
+        }
+        tap_pending &= ~rel;
         if (b & (1u << BTN_REC)) {              /* toggle record mode: stop playback, reset the cursor */
             rec_mode = !rec_mode;
-            if (rec_mode) { seq_running = 0; rec_step = 0; stop((uint32_t)voice[0].note); }
+            if (rec_mode) { seq_running = 0; rec_step = 0; stop((uint32_t)voice[0].note); seq_halt(); }
 #ifndef DINGHY_HOST
             else if (rec_step_drawn >= 0) { led_dim(KEY_LED(white_key_id((uint32_t)rec_step_drawn)), 0); rec_step_drawn = -1; }
 #endif
@@ -529,26 +708,37 @@ static void app_main(void)
         if (b & (1u << BTN_PLAY) && !rec_mode) {   /* toggle the sequencer; can't run while recording */
             seq_running = !seq_running;
             if (seq_running) { seq_step = 0; seq_next_ms = fm1_ms; }
-            else stop((uint32_t)voice[0].note);
+            else seq_halt();
         }
 
         {                                        /* 7 knobs, no menus (see the comment above knob()) */
             int32_t lfo = (int32_t)(fm1_in.buttons & (1u << BTN_LFO));
+            int32_t env = (int32_t)(fm1_in.buttons & (1u << BTN_ENV));   /* BTN_ENV held: the envelope,
+                                                                       * same idea as BTN_LFO */
             int32_t seqShift = (int32_t)(fm1_in.buttons & (1u << BTN_SEQ));
             int32_t d;
             d = fm1_enc_take(ENC_KNOB1);
-            if (lfo) knob(&par.lfoXRate,  d, 20, 0, 1000, 6); else knob(&par.size,   d, 20,  500, 2000, 0);
+            if (env && d) tap_pending = 0;      /* ENV used as a shift: not a tap (record mode) */
+            if (lfo) knob(&par.lfoXRate,  d, 20, 0, 1000, 6); else if (env) knob(&par.decay,  d, 20, 0, 1000, 13);
+            else knob(&par.size,   d, 20,  500, 2000, 0);
             d = fm1_enc_take(ENC_KNOB2);
-            if (lfo) knob(&par.lfoXDepth, d, 20, 0, 1000, 7); else knob(&par.resx10, d, 10,   10,  500, 1);
+            if (env && d) tap_pending = 0;
+            if (lfo) knob(&par.lfoXDepth, d, 20, 0, 1000, 7); else if (env) knob(&par.envmod, d, 20, 0, 1000, 14);
+            else knob(&par.resx10, d, 10,   10,  500, 1);
             d = fm1_enc_take(ENC_KNOB3);
-            if (lfo) knob(&par.lfoYRate,  d, 20, 0, 1000, 8); else knob(&par.voice,  d, 20,    0, 1000, 2);
+            if (env && d) tap_pending = 0;
+            if (lfo) knob(&par.lfoYRate,  d, 20, 0, 1000, 8); else if (env) knob(&par.accent, d, 20, 0, 1000, 15);
+            else knob(&par.voice,  d, 20,    0, 1000, 2);
             d = fm1_enc_take(ENC_KNOB4);
-            if (lfo) knob(&par.lfoYDepth, d, 20, 0, 1000, 9); else knob(&par.level,  d, 20,    0, 1000, 3);
+            if (env && d) tap_pending = 0;
+            if (lfo) knob(&par.lfoYDepth, d, 20, 0, 1000, 9); else if (env) knob(&par.ampdec, d, 20, 0, 1000, 16);
+            else knob(&par.cutoff, d, 20,    0, 1000, 3);
             knob(&par.x, fm1_enc_take(ENC_ALGORITHM), 20, 0, 1000, 4);
             d = fm1_enc_take(ENC_SELECT);        /* Y normally; steps while recording; tempo under SEQ */
             if (d) {
                 if (rec_mode) {
                     rec_step += d;
+                    tap_pending = 0;
                     if (rec_step < 0) rec_step = 0; else if (rec_step >= (int32_t)NSTEP) rec_step = (int32_t)NSTEP - 1;
                     touched_id = 12; touched_val = rec_step;
                 } else if (seqShift) {
@@ -581,10 +771,12 @@ static void app_main(void)
                     midiclk_count = 0;
                     seq_trigger(&set.step[seq_step]);
                     seq_step = (seq_step + 1) % (int32_t)NSTEP;
+                } else if (seq_running && !rec_mode && midiclk_count == 3u) {
+                    seq_release();              /* half a 16th: the note lets go unless it ties */
                 }
             } else if (st == 0xFAu) { seq_running = 1; seq_step = 0; midiclk_count = 0; }   /* start */
             else if (st == 0xFBu) { seq_running = 1; }                                       /* continue */
-            else if (st == 0xFCu) { seq_running = 0; stop((uint32_t)voice[0].note); }        /* stop */
+            else if (st == 0xFCu) { seq_running = 0; seq_halt(); }                            /* stop */
         }
 
         /* one sequencer step at the internal tempo -- only when no external MIDI clock has ticked in
@@ -592,9 +784,12 @@ static void app_main(void)
          * (above), so the two never double-trigger */
         if (seq_running && !rec_mode && fm1_ms - midiclk_last_ms > 500u && fm1_ms >= seq_next_ms) {
             seq_next_ms += (uint32_t)(15000 / set.bpm);   /* 60000 / bpm / 4; no drift: += not = */
+            seq_off_ms = fm1_ms + (uint32_t)(7500 / set.bpm);   /* half a step */
             seq_trigger(&set.step[seq_step]);
             seq_step = (seq_step + 1) % (int32_t)NSTEP;
         }
+        if (seq_running && fm1_ms - midiclk_last_ms > 500u && (int32_t)(fm1_ms - seq_off_ms) >= 0)
+            seq_release();                       /* internal clock: the note lets go unless it ties */
 
         base = (uint32_t)(KEY0 + 12 * set.oct);
         for (k = 0; k < NV; k++)                 /* what actually sounds, on the keys of this octave --
@@ -622,8 +817,17 @@ static void app_main(void)
             led_dim(KEY_LED(white_key_id((uint32_t)rec_step)), 1);
             rec_step_drawn = rec_step;
         }
-        fm1_led_key(BTN_GLO, (fm1_in.buttons & (1u << BTN_GLO)) != 0          /* full bright while held */
-                           || (rec_mode && (set.step[rec_step].flags & 2u) != 0));  /* or browsing a slide step */
+        {                                        /* GLO = slide, ENV = accent: GLO glows softly in record
+                                                   * mode (ENV always, see above); full while held (GLO:
+                                                   * in record mode), or when the step under the cursor
+                                                   * has it; while playing, full on the step that sounds
+                                                   * if it has it */
+            uint32_t f = rec_mode ? set.step[rec_step].flags
+                       : seq_running ? set.step[(seq_step + (int32_t)NSTEP - 1) % (int32_t)NSTEP].flags : 0u;
+            led_dim(BTN_GLO, rec_mode != 0);
+            fm1_led_key(BTN_GLO, (rec_mode && (fm1_in.buttons & (1u << BTN_GLO))) || (f & 2u));
+            fm1_led_key(BTN_ENV, (fm1_in.buttons & (1u << BTN_ENV)) || (f & 4u));
+        }
 #endif
 #ifndef DINGHY_HOST
         fm1_led_key(BTN_LFO, (fm1_in.buttons & (1u << BTN_LFO)) != 0);   /* full bright while held; the
@@ -634,6 +838,14 @@ static void app_main(void)
         if (lit != lit_drawn) { lit_drawn = lit; draw_keys(lit); }   /* redraw only what changed */
         if (last_note != note_drawn) { note_drawn = last_note; draw_note(); }
         if (set.oct != oct_drawn) { oct_drawn = set.oct; draw_status(set.oct); }
+        {
+            int32_t mark = rec_mode ? rec_step
+                         : seq_running ? (seq_step + (int32_t)NSTEP - 1) % (int32_t)NSTEP : -1;
+            uint32_t changed = mark != mark_drawn;
+            for (k = 0; k < NSTEP; k++)
+                if (flags_drawn[k] != set.step[k].flags) { flags_drawn[k] = set.step[k].flags; changed = 1; }
+            if (changed) { mark_drawn = mark; draw_steps(set.step, mark); }
+        }
 #ifndef DINGHY_HOST
         if (touched_id != ~0u && (touched_id != touched_id_drawn || touched_val != touched_val_drawn)) {
             touched_id_drawn = touched_id; touched_val_drawn = touched_val;
