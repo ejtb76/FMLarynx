@@ -428,7 +428,7 @@ static void draw_keys(uint32_t lit)             /* bit k: key k sounds */
  * its note into the cursor step and advances; hold BTN_GLO while pressing the key to mark that
  * step a slide -- it ties into the next step, which glides there, see seq_trigger()); hold BTN_ENV
  * the same way to accent it (louder, plus the accent_env sweep above); a tap on either alone
- * toggles it on the cursor step. BTN_PLAY runs the pattern; hold BTN_SEQ + ENC_SELECT
+ * toggles it on the cursor step; BTN_SEL enters a rest (clears the step, moves on). BTN_PLAY runs the pattern; hold BTN_SEQ + ENC_SELECT
  * sets the tempo. The pattern and tempo live in `set` (app_main()) so they survive a power-off,
  * same as the octave. A step with no note recorded into it plays as a rest (silence). */
 #define NSTEP 16u
@@ -698,6 +698,16 @@ static void app_main(void)
             dirty = 1; t_change = fm1_ms;
         }
         tap_pending &= ~rel;
+        if (rec_mode && (b & (1u << BTN_SEL))) {   /* SEL in record mode: a rest -- clears the cursor
+                                                   * step (note, slide, accent) and moves on, the same
+                                                   * way a key records a note and moves on */
+            set.step[rec_step].note = 0;
+            set.step[rec_step].flags = 0;
+            rec_step = (int32_t)((rec_step + 1) % (int32_t)NSTEP);
+            tap_pending = 0;
+            dirty = 1; t_change = fm1_ms;
+            touched_id = 12; touched_val = rec_step;
+        }
         if (b & (1u << BTN_REC)) {              /* toggle record mode: stop playback, reset the cursor */
             rec_mode = !rec_mode;
             if (rec_mode) { seq_running = 0; rec_step = 0; stop((uint32_t)voice[0].note); seq_halt(); }
@@ -825,6 +835,8 @@ static void app_main(void)
             uint32_t f = rec_mode ? set.step[rec_step].flags
                        : seq_running ? set.step[(seq_step + (int32_t)NSTEP - 1) % (int32_t)NSTEP].flags : 0u;
             led_dim(BTN_GLO, rec_mode != 0);
+            led_dim(BTN_SEL, rec_mode != 0);     /* SEL = rest, likewise only in record mode */
+            fm1_led_key(BTN_SEL, rec_mode && (fm1_in.buttons & (1u << BTN_SEL)));
             fm1_led_key(BTN_GLO, (rec_mode && (fm1_in.buttons & (1u << BTN_GLO))) || (f & 2u));
             fm1_led_key(BTN_ENV, (fm1_in.buttons & (1u << BTN_ENV)) || (f & 4u));
         }

@@ -77,6 +77,7 @@ value of the last control you turned.
 | **REC** | Sequencer record mode on/off. |
 | **PLAY** | Start/stop the sequencer. |
 | **GLO** | In record mode: marks slides (it only glows there). |
+| **SEL** | In record mode: enters a rest (clears the cursor step and moves on; it only glows there). |
 | **SEQ** | Hold and turn **SELECT** to set the tempo. |
 
 ## Sequencer
@@ -92,8 +93,9 @@ Each step is a 16th note.
    while pressing the key to make that step a slide and/or an accent.
 4. Press **REC** again to leave record mode.
 
-You hear every note as you enter it. A step without a note is a rest. To change a step, move the cursor to it and
-record over it. To add or remove a slide or accent afterwards, move the cursor to the step and tap **GLO** or
+You hear every note as you enter it. A step without a note is a rest: press **SEL** to enter one (it clears the
+cursor step and moves on, like a key does), so notes and rests go in one after the other. To change a step, move
+the cursor to it and record over it, or press **SEL** to clear it. To add or remove a slide or accent afterwards, move the cursor to the step and tap **GLO** or
 **ENV** on its own: it toggles on release, and only if you didn't press a key or turn SELECT while holding it.
 
 **Notes and slides, as on a 303:** a note sounds for half its step, then lets go. A slide on a step holds its note
