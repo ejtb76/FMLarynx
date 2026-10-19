@@ -10,8 +10,10 @@ It is a port of FormantSynth, a VST3 plugin, to the FM-1's chip, and is built on
 [Dinghy](https://github.com/zvenson/dinghy) by zvenson.
 
 > **Status: prototype, runs on the FM-1.** Tested on the device: the sound engine, all knobs, both LFOs, the
-> sequencer and its LEDs, the pattern kept in flash. The package identity is still
-> Dinghy's (`FM-1_990`); its own comes before the first release.
+> sequencer and its LEDs, the pattern kept in flash.
+
+**Package identity:** `FM-1_93N`, with N the minor version (release 0.1 is `FM-1_931`); development builds are
+`FM-1_939`.
 
 ## The sound
 
