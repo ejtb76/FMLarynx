@@ -2,9 +2,9 @@
 
 **A formant synthesizer firmware for the M-VAVE FM-1.**
 
-FMLarynx turns the FM-1 into a monophonic "talking" synth: a sawtooth is shaped by a filter modelled on the human
-vocal tract, so each note sounds like a sung vowel. You glide between vowels with two encoders, wobble them with two
-LFOs, and play it from the keys, over USB-MIDI, or from a built-in 303-style 16-step sequencer with slides.
+A throaty talking formant synth with a 303-style pattern sequencer: The synth is a saw wave through a three-formant
+vowel filter with an envelope, an added resonant LPF with cutoff and a ping-pong delay with drive. The 16-step
+sequencer has vowels, accent and slide per step, a pattern randomizer and storage for 16 patterns.
 
 It is a port of FormantSynth, a VST3 plugin, to the FM-1's chip, and is built on
 [Dinghy](https://github.com/zvenson/dinghy) by zvenson.
