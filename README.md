@@ -44,6 +44,16 @@ One voice, three formants:
 
 Everything runs in integer maths (the chip has no FPU); the audio routine uses well under its time budget.
 
+## The screen
+
+The top of the screen looks down a throat: rings of flesh from pink to deep red, the uvula hanging from above, the
+tongue below, teeth along the edge, and the note you play in the opening. The opening follows the vowel: tall and
+wide for "a", a flat slit for "i", small and round for "u", and everything in between as you turn X and Y or the
+LFOs move them. On an accent the uvula wobbles.
+
+Below it: the step strip (see the sequencer), the keyboard with the keys that sound, the last control you turned with
+its value, and the octave.
+
 ## Controls
 
 No menus: every parameter has its own encoder. The **LFO** and **ENV** buttons turn knobs 1 to 4 into the LFO or
@@ -59,7 +69,7 @@ the envelope controls for as long as you hold them.
 | **KNOB 4** | Cutoff, 0 to 1000 (60 Hz to open) | LFO Y depth, 0 to 1000 | Amp Decay, 0 to 1000 (30 ms to 2 s; 1000 holds) |
 | **ALGORITHM** | Vowel X, 0 to 1000 | | |
 | **SELECT** | Vowel Y, 0 to 1000 (see the sequencer for its other jobs) | | |
-| **PRESETS** | Jump to a vowel: i, e, a, o, u | | |
+| **PRESETS** | Jump to a vowel: i, e, a, o, u (in record mode: the cursor step's vowel) | | |
 | **MASTER** | Volume | | |
 
 At power-on: Cutoff open, Env Mod 0, Decay 500, Accent 1000, Amp Decay 1000, so the envelope is out of the way
@@ -81,6 +91,7 @@ value of the last control you turned.
 | **GLO** | In record mode: marks slides (it only glows there). |
 | **SEL** | In record mode: enters a rest (clears the cursor step and moves on; it only glows there). |
 | **SEQ** | Hold and turn **SELECT** to set the tempo. |
+| **ARP** | The pattern randomizer: hold it and press **PLAY**, a key or turn **SELECT** (see below). |
 
 ## Sequencer
 
@@ -97,8 +108,14 @@ Each step is a 16th note.
 
 You hear every note as you enter it. A step without a note is a rest: press **SEL** to enter one (it clears the
 cursor step and moves on, like a key does), so notes and rests go in one after the other. To change a step, move
-the cursor to it and record over it, or press **SEL** to clear it. To add or remove a slide or accent afterwards, move the cursor to the step and tap **GLO** or
-**ENV** on its own: it toggles on release, and only if you didn't press a key or turn SELECT while holding it.
+the cursor to it and record over it, or press **SEL** to clear it. To add or remove a slide or accent afterwards,
+move the cursor to the step and tap **GLO** or **ENV** on its own: it toggles on release, and only if you didn't
+press a key or turn SELECT while holding it.
+
+**A vowel per step:** in record mode, turn **PRESETS** to give the cursor step its own vowel (**-**, i, e, a, o, u;
+**-** = none). There is nothing to confirm: the step has it as you turn, and the throat shows it. While the pattern
+plays, a step with a vowel glides there; steps without one follow the X/Y knobs, and the LFOs work on top of both.
+Recording a note over a step keeps its vowel; **SEL** clears it with the rest.
 
 **Notes and slides, as on a 303:** a note sounds for half its step, then lets go. A slide on a step holds its note
 into the next step, which then glides there in pitch (in ~50 ms) without restarting the envelope.
@@ -106,8 +123,8 @@ into the next step, which then glides there in pitch (in ~50 ms) without restart
 **Accents:** louder, with a short burst of resonance and a vowel shift towards "a"; **ENV** + KNOB 3 sets how much.
 
 **On the screen:** a strip of 16 cells above the keyboard shows the pattern, each cell over its own white key:
-dark = rest, grey = a note, lilac = an accented note, a bar running into the next cell = a slide, and a white tick
-under the cursor (record mode) or under the step that is playing.
+dark = rest, pale = a note, pink = an accented note, a tiny letter = the step's vowel, a bar running into the next
+cell = a slide, and a red tick under the cursor (record mode) or under the step that is playing.
 
 **The lights in record mode**
 
@@ -123,12 +140,23 @@ While the pattern plays, **GLO** and **ENV** light up on every step that has a s
 
 **Playing:** press **PLAY**. Hold **SEQ** and turn **SELECT** to set the tempo (40 to 300 BPM, 120 by default).
 
+**Random patterns:** hold **ARP** and
+
+- press **PLAY**: a new random pattern, heard from the next step if it is playing (it doesn't start or stop it);
+- press a key: that note becomes the root, and a pattern on it comes right away;
+- turn **SELECT**: the scale, one of MIN PENTA, MINOR, PHRYGIAN, DORIAN, MAJOR, CHROMATIC.
+
+The notes come from the scale over the root, two octaves up, with the root and its octave the most likely; step 1 is
+always the root. About a quarter of the steps are rests, a fifth slides and a quarter accents. Root and scale are
+kept with the pattern.
+
 **MIDI clock:** when a DAW or another device sends MIDI clock over USB, the sequencer follows it, and MIDI
 start, stop and continue start and stop it. If the clock stops for half a second, it carries on at its own tempo.
 
-**Saved:** the pattern, the tempo and the octave are kept in flash and come back after power-off. They are saved two
-seconds after your last change, once nothing is sounding, because writing to flash briefly interrupts the sound. Stop
-the sequencer for a moment before you switch off, so your last changes are saved.
+**Saved:** the pattern, the tempo, the octave, and the randomizer's root and scale are kept in flash and come back
+after power-off. They are saved two seconds after your last change, once the sequencer is stopped and nothing is
+sounding, because writing to flash briefly interrupts the sound. Stop the sequencer for a moment before you switch
+off, so your last changes are saved.
 
 ## MIDI and audio over USB
 

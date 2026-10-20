@@ -13,6 +13,8 @@
  * tests/host.c runs this file on a computer: the screen as a PNG, the sound as a WAV.
  * What platform.c offers: docs/API.md. The chip's rules: docs/RULES.md. */
 #define APP_NAME "FMLARYNX"                      /* the screen, the rescue and the crash screen say this */
+#define LCD_BAUD 2u                             /* LCD SPI at 60/(2+1) = 20 MHz, not the platform's 12: the
+                                                  * throat is ~55 KB a frame (the ST7789 takes up to ~60) */
 #include "platform.c"
 
 /* ---- the sound (runs in the audio ISR: keep it short, no flash, no screen)
@@ -123,6 +125,9 @@ static void vowel_freqs(int32_t x, int32_t y, int32_t voice_pm, int32_t outHz[NB
 static int32_t mFreq[NB] = {-1, -1, -1};        /* smoothed centre freq per band, Hz; -1 = snap on first block */
 static int32_t fz1x[NB], fz2x[NB], fz1y[NB], fz2y[NB];   /* x[n-1], x[n-2], y[n-1], y[n-2] per band */
 static uint32_t lfoXPh, lfoYPh;                 /* LFO phase, advanced once per block (control rate) */
+static volatile int32_t vow_lock;               /* 0, or 1..5: a step's vowel (i e a o u) in place of the
+                                                  * X/Y knobs -- the playing step's, or in record mode the
+                                                  * cursor step's; set by the main loop, read by the ISR */
 
 /* Accent (TB-303 / MC-202 style, per sequencer step): seq_trigger() sets accent_env to full, and it
  * decays once per block (~200 ms). While it is up it raises the resonance (up to 2x Q) and pulls the
@@ -171,7 +176,8 @@ static void formant_update_coeffs(int32_t cb0[NB], int32_t cb2[NB], int32_t ca1[
 {
     int32_t lfoX = (sine(lfoXPh) * par.lfoXDepth) / 32767;    /* -depth..depth, pm */
     int32_t lfoY = (sine(lfoYPh) * par.lfoYDepth) / 32767;
-    int32_t x = par.x + lfoX, y = par.y + lfoY, target[NB];
+    int32_t vl = vow_lock;                      /* a step's vowel replaces the knobs; the LFOs stay on top */
+    int32_t x = (vl ? vowel_x[vl - 1] : par.x) + lfoX, y = (vl ? vowel_y[vl - 1] : par.y) + lfoY, target[NB];
     int32_t acc = accent_env * par.accent / 1000;          /* the Accent knob scales all of it */
     int32_t sz = par.size + ((par.size * par.envmod / 1000) * mod_env >> 15);   /* Env Mod: up to 2x */
     uint32_t b;
@@ -386,39 +392,179 @@ static int quiet(void)                          /* nothing sounds, not even a re
     return 1;
 }
 
-/* ---- the screen: the name, the last note big, the keyboard with what sounds, the octave */
-#define C_ACC RGB(180, 140, 255)                /* lilac, as the logo */
-#define C_KEY RGB(210, 210, 210)
-#define C_OFF RGB(90, 90, 90)
+/* ---- the screen: the inside of a throat on top -- its opening follows the vowel (X/Y), the note
+ * sounding in it -- then the step strip, the keyboard, and the last knob moved and the octave. One
+ * palette of flesh tones for all of it. */
+#define C_BG     RGB(28, 6, 12)                 /* behind everything: almost black, a bit of red */
+#define C_KEY    RGB(246, 205, 196)             /* white keys, notes in the strip: pale flesh */
+#define C_BLK    RGB(92, 18, 36)                /* black keys: deep red */
+#define C_LIT    RGB(232, 64, 88)               /* a key that sounds: raw red */
+#define C_EMPTY  RGB(66, 22, 32)                /* a rest in the strip */
+#define C_ACC    RGB(240, 120, 150)             /* an accented step: hot pink */
+#define C_TEXT   RGB(232, 150, 160)
+#define C_DIMT   RGB(140, 70, 82)
+#define C_HOLE   RGB(15, 0, 5)
+#define C_TONGUE RGB(220, 80, 100)
+#define C_GROOVE RGB(190, 60, 85)
+#define C_UVULA  RGB(210, 85, 105)
+#define C_UVTIP  RGB(225, 95, 115)
+#define C_TOOTH  RGB(245, 240, 225)
+#define C_SHINE  RGB(255, 190, 200)
+#define C_DEEP   RGB(90, 10, 30)                /* the throat's walls: deep down .. */
+#define C_NEAR   RGB(232, 120, 135)             /* .. and at the edge */
 #define KEY0 53u                                /* key 0 = F3 */
+#define THROAT_H 114u                           /* screen rows 0..113; the step strip starts at 116 */
 static int black(uint32_t note) { return (0x54Au >> (note % 12u)) & 1u; }
 
-static void draw_note(void)
+static uint16_t mix565(uint16_t a, uint16_t b, uint32_t t, uint32_t n)   /* colour a..b, t of n */
+{
+    int32_t ar = a >> 11, ag = (a >> 5) & 63, ab = a & 31, br = b >> 11, bg = (b >> 5) & 63, bb = b & 31;
+    int32_t r = ar + (br - ar) * (int32_t)t / (int32_t)n, g = ag + (bg - ag) * (int32_t)t / (int32_t)n;
+    int32_t bl = ab + (bb - ab) * (int32_t)t / (int32_t)n;
+    return (uint16_t)(((uint32_t)r << 11) | ((uint32_t)g << 5) | (uint32_t)bl);
+}
+
+/* text blended onto whatever is already in the canvas (cv_text() blends onto black only), so it
+ * can sit on the throat or on C_BG without dark fringes */
+static int32_t cv_text_over(int32_t x, int32_t y, const felucca_font_t *f, const char *s, uint16_t c)
+{
+    for (; *s; s++) {
+        uint32_t gi = glyph(f, (uint8_t)*s), gx, gy, w = f->bw[gi], bpr = (w + 1u) / 2u;
+        const uint8_t *gd = f->data + f->off[gi];
+        for (gy = 0; gy < f->h; gy++)
+            for (gx = 0; gx < w; gx++) {
+                uint32_t v = gd[gy * bpr + gx / 2u];
+                int32_t px = x - f->pad + (int32_t)gx, py = y + (int32_t)gy + cv_oy;
+                v = (gx & 1u) ? (v & 15u) : (v >> 4);
+                if (v && (uint32_t)px < cv_w && (uint32_t)py < cv_h) {
+                    uint16_t *d = &cv_px[(uint32_t)py * cv_w + (uint32_t)px];
+                    *d = swap16(mix565(swap16(*d), c, v, 15u));
+                }
+            }
+        x += f->adv[gi];
+    }
+    return x;
+}
+
+#ifndef DINGHY_HOST
+static int lcd_idle(void) { return !lcd_busy || fm1_lcd_done(); }   /* the last blit has gone out */
+#else
+static int lcd_idle(void) { return 1; }        /* the host's screen is instant */
+#endif
+
+static void text_box(uint32_t x, uint32_t y, uint32_t w, const felucca_font_t *f, const char *s, uint16_t c)
+{                                               /* like draw_text_box(), centred, on C_BG */
+    cv_begin(w, f->h, C_BG);
+    cv_oy = 0;
+    cv_text_over(((int32_t)w - text_w(f, s)) / 2, 0, f, s, c);
+    cv_blit(x, y);
+}
+
+static int32_t isqrt(int32_t n)                 /* floor(sqrt(n)), n >= 0 */
+{
+    int32_t r = 0, b = 1 << 30;
+    while (b > n) b >>= 2;
+    while (b) {
+        if (n >= r + b) { n -= r + b; r = (r >> 1) + b; } else r >>= 1;
+        b >>= 2;
+    }
+    return r;
+}
+
+static void fill_ellipse(int32_t cx, int32_t cy, int32_t rx, int32_t ry, uint16_t c)
+{                                               /* one cv_rect() per canvas row it covers */
+    int32_t y0 = cy - ry, y1 = cy + ry, y;
+    if (ry < 1 || rx < 1) return;
+    if (y0 < -cv_oy) y0 = -cv_oy;               /* only the rows of this strip */
+    if (y1 > (int32_t)cv_h - 1 - cv_oy) y1 = (int32_t)cv_h - 1 - cv_oy;
+    for (y = y0; y <= y1; y++) {
+        int32_t dy = y - cy, hw = rx * isqrt((ry * ry - dy * dy) << 8) / (ry << 4);
+        cv_rect(cx - hw, y, 2 * hw + 1, 1, c);
+    }
+}
+
+static void note_name(char *s, uint32_t note)   /* "A#3", or "-" for none */
 {
     static const char *const NAME[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-    char s[8] = "-";
-    if (last_note < 128u) {
-        const char *p = NAME[last_note % 12u];
-        uint32_t i = 0;
+    uint32_t i = 0;
+    if (note < 128u) {
+        const char *p = NAME[note % 12u];
         while (*p) s[i++] = *p++;
-        if (last_note >= 12u) s[i++] = (char)('0' + last_note / 12u - 1u);
-        s[i] = 0;
+        if (note >= 12u) s[i++] = (char)('0' + note / 12u - 1u);
+    } else
+        s[i++] = '-';
+    s[i] = 0;
+}
+
+/* A piece of the throat (screen columns x0..x0+w-1, rows row0..row0+h-1): a tunnel of rings from
+ * pink at the edge to dark red deep down, its opening shaped by the vowel -- Y opens it (i/u low and
+ * narrow, a high and wide), X rounds it (front i/e wide and flat, back o/u round) -- with the uvula
+ * hanging over it (its tip swayed sideways by sway px), the tongue under it, teeth along the top and
+ * the note in the opening. x, y in pm. */
+static void draw_throat(uint32_t x0, uint32_t w, uint32_t row0, uint32_t h, int32_t x, int32_t y,
+                        uint32_t note, int32_t sway)
+{
+    static const int8_t TOOTH_INSET[5] = {0, 0, 1, 2, 3};
+    const int32_t cx = 120 - (int32_t)x0, cy = 60, RINGS = 7;   /* cx: in canvas columns */
+    int32_t hh = 10 + 34 * y / 1000;            /* the opening: half height .. */
+    int32_t hw = hh + (1000 - x) * (54 - hh > 0 ? 54 - hh : 0) / 1000;   /* .. and half width */
+    int32_t k, ut, tt, r;
+    char nm[8];
+    cv_begin(w, h, C_BG);
+    cv_oy = -(int32_t)row0;                     /* draw in screen rows */
+    for (k = RINGS; k > 0; k--)                 /* outside in: the tunnel */
+        fill_ellipse(cx, cy, hw + k * (150 - hw) / RINGS, hh + k * (80 - hh) / RINGS,
+                     mix565(C_DEEP, C_NEAR, (uint32_t)k, (uint32_t)RINGS));
+    for (k = 3; k <= 5; k += 2) {               /* wet shine: short thin arcs, upper left of two rings,
+                                                  * only a quarter of the way from the ring's own colour
+                                                  * to C_SHINE -- a hint, not a highlight */
+        int32_t rw = hw + k * (150 - hw) / RINGS, rh = hh + k * (80 - hh) / RINGS, a;
+        uint16_t c = mix565(mix565(C_DEEP, C_NEAR, (uint32_t)k, (uint32_t)RINGS), C_SHINE, 1u, 4u);
+        for (a = 210; a <= 240; a++) {
+            uint32_t ph = (uint32_t)a * 11930465u;          /* degrees -> the sine() phase */
+            int32_t px = cx + rw * sine(ph + (1u << 30)) / 32767, py = cy + rh * sine(ph) / 32767;
+            cv_rect(px, py, 1, 1, c);
+        }
     }
-    draw_text_box(0, 82, 240, &FONT_L, s, C_WHITE, 1);
+    fill_ellipse(cx, cy, hw, hh, C_HOLE);       /* the opening */
+    tt = cy + hh - 2;                           /* the tongue, its top just under the opening */
+    fill_ellipse(cx, tt + 45, 70, 45, C_TONGUE);
+    fill_ellipse(cx, tt + 33, 4, 27, C_GROOVE);
+    ut = cy - hh - 2;                           /* the uvula, its tip just over the opening, or in front
+                                                  * of it, halfway down, when it is wide open */
+    if (ut < 30) ut = 30;
+    for (r = 0; r < ut - 10; r++) {             /* hung at the top, swaying more towards the tip */
+        int32_t half = 9 - 3 * r / (ut - 10), off = sway * r / (ut - 10);
+        cv_rect(cx + off - half, r, 2 * half + 1, 1, C_UVULA);
+    }
+    fill_ellipse(cx + sway, ut - 10, 9, 10, C_UVTIP);
+    for (k = 0; k < 10; k++)                    /* teeth along the top edge */
+        for (r = 0; r < 11; r++) {
+            int32_t in = r < 6 ? 0 : TOOTH_INSET[r - 6];
+            cv_rect(4 + k * 47 / 2 - (int32_t)x0 + in, r, 20 - 2 * in, 1, C_TOOTH);
+        }
+    note_name(nm, note);                        /* the note, in the opening, with a dark shadow */
+    {
+        int32_t tx = cx - text_w(&FONT_L, nm) / 2, ty = cy - (int32_t)FONT_L.h / 2;
+        cv_text_over(tx + 1, ty + 1, &FONT_L, nm, C_HOLE);
+        cv_text_over(tx, ty, &FONT_L, nm, C_WHITE);
+    }
+    cv_blit(x0, row0);
+    cv_oy = 0;
 }
 
 static void draw_keys(uint32_t lit)             /* bit k: key k sounds */
 {
     uint32_t k, w = 0;
-    cv_begin(240, 56, C_BLACK);
+    cv_begin(240, 56, C_BG);
     for (k = 0; k < 27u; k++)                   /* 16 white keys of 14 px from x = 8 */
         if (!black(KEY0 + k)) {
-            cv_rect(8 + (int32_t)w * 14, 0, 13, 56, lit >> k & 1u ? C_ACC : C_KEY);
+            cv_rect(8 + (int32_t)w * 14, 0, 13, 56, lit >> k & 1u ? C_LIT : C_KEY);
             w++;
         }
     for (k = 0, w = 0; k < 27u; k++)            /* the black ones on the line between two white */
         if (black(KEY0 + k))
-            cv_rect(8 + (int32_t)w * 14 - 5, 0, 9, 34, lit >> k & 1u ? C_ACC : C_BLACK);
+            cv_rect(8 + (int32_t)w * 14 - 5, 0, 9, 34, lit >> k & 1u ? C_LIT : C_BLK);
         else
             w++;
     cv_blit(0, 140);
@@ -428,14 +574,22 @@ static void draw_keys(uint32_t lit)             /* bit k: key k sounds */
  * its note into the cursor step and advances; hold BTN_GLO while pressing the key to mark that
  * step a slide -- it ties into the next step, which glides there, see seq_trigger()); hold BTN_ENV
  * the same way to accent it (louder, plus the accent_env sweep above); a tap on either alone
- * toggles it on the cursor step; BTN_SEL enters a rest (clears the step, moves on). BTN_PLAY runs the pattern; hold BTN_SEQ + ENC_SELECT
+ * toggles it on the cursor step; BTN_SEL enters a rest (clears the step, moves on). BTN_PLAY runs the pattern
+ * (BTN_ARP + BTN_PLAY: a random one, see seq_randomize()); hold BTN_SEQ + ENC_SELECT
  * sets the tempo. The pattern and tempo live in `set` (app_main()) so they survive a power-off,
  * same as the octave. A step with no note recorded into it plays as a rest (silence). */
 #define NSTEP 16u
 
-struct seq_step_s { uint8_t note, flags; };     /* flags: bit0 active, bit1 slide, bit2 accent -- a new
-                                                  * bit in the same byte, so `set` keeps its size and old
-                                                  * patterns load as they were (no accents) */
+#ifndef DINGHY_HOST
+#define RNG_SEED fm1_ticks()
+#else
+#define RNG_SEED 12345u
+#endif
+struct seq_step_s { uint8_t note, flags; };     /* flags: bit0 active, bit1 slide, bit2 accent, bits 3-5
+                                                  * a vowel lock (0 none, 1..5 i e a o u) -- new bits in the
+                                                  * same byte, so `set` keeps its size and old patterns load
+                                                  * as they were (no accents, no vowels) */
+#define STEP_VOW(f) ((uint32_t)(f) >> 3 & 7u)
 
 /* As on a 303: a note sounds for half its step, then lets go (seq_release()); a slide step holds its
  * note into the next step instead, which then glides there in pitch without restarting the envelope.
@@ -459,6 +613,8 @@ static void seq_halt(void)                      /* the sequencer stops: let go o
     seq_release();
 }
 
+static uint32_t uv_kick_ms = 0u - 1000u;       /* the last accent, for the uvula's wobble */
+
 static void seq_trigger(const struct seq_step_s *s)   /* shared by the internal clock and MIDI clock */
 {
     uint32_t prev = seq_note;
@@ -466,7 +622,7 @@ static void seq_trigger(const struct seq_step_s *s)   /* shared by the internal 
         uint32_t vel = s->flags & 4u ? 100u + 27u * (uint32_t)par.accent / 1000u : 100u;   /* accent: louder */
         int32_t slide = seq_tie && prev < 128u;        /* the step before tied into this one */
         if (!slide) voice[0].amp = 0;                  /* not a slide: hard retrigger */
-        if (s->flags & 4u) accent_env = 32767;
+        if (s->flags & 4u) { accent_env = 32767; uv_kick_ms = fm1_ms; }   /* the uvula wobbles too */
         glide_next = slide;
         play(s->note, vel);
         glide_next = 0;
@@ -478,9 +634,55 @@ static void seq_trigger(const struct seq_step_s *s)   /* shared by the internal 
             midi_send(0x90, s->note, vel);
         }                                                /* same note tied: it just goes on */
         seq_note = s->note;
+        vow_lock = (int32_t)STEP_VOW(s->flags);        /* the step's vowel, or back to the knobs */
         seq_tie = (s->flags & 2u) != 0;
     } else {
         seq_halt();                                    /* an empty step is a rest, and ends a tie */
+    }
+}
+
+/* ARP + PLAY: a random pattern, acid style -- notes from the chosen scale over the chosen root, two
+ * octaves up, the root and its octave the most likely; step 1 always the root, so the groove has an
+ * anchor; about a quarter rests, a fifth slides, a quarter accents. ARP + a key picks the root (and
+ * makes a pattern on it), ARP + SELECT the scale. (ARP, not SEQ: SEQ sits right next to PLAY.) Plain xorshift, seeded by the free-running tick
+ * counter at the first press, so every power-on gives other patterns. */
+#define NSCALE 6u
+static const uint16_t SCALE_MASK[NSCALE] = {    /* bit n: n semitones over the root is in the scale */
+    0x0000u | 1u << 0 | 1u << 3 | 1u << 5 | 1u << 7 | 1u << 10,                       /* minor pentatonic */
+    0x0000u | 1u << 0 | 1u << 2 | 1u << 3 | 1u << 5 | 1u << 7 | 1u << 8 | 1u << 10,   /* natural minor */
+    0x0000u | 1u << 0 | 1u << 1 | 1u << 3 | 1u << 5 | 1u << 7 | 1u << 8 | 1u << 10,   /* phrygian */
+    0x0000u | 1u << 0 | 1u << 2 | 1u << 3 | 1u << 5 | 1u << 7 | 1u << 9 | 1u << 10,   /* dorian */
+    0x0000u | 1u << 0 | 1u << 2 | 1u << 4 | 1u << 5 | 1u << 7 | 1u << 9 | 1u << 11,   /* major */
+    0x0FFFu,                                                                          /* chromatic */
+};
+static uint32_t seq_rng;                        /* own state: libc.c's rng() isn't in the host build */
+static uint32_t rnd(uint32_t n)                 /* 0 .. n-1 */
+{
+    if (!seq_rng) seq_rng = RNG_SEED | 1u;
+    seq_rng ^= seq_rng << 13; seq_rng ^= seq_rng >> 17; seq_rng ^= seq_rng << 5;
+    return seq_rng % n;
+}
+static void seq_randomize(struct seq_step_s *step, uint32_t root, uint32_t scale)
+{
+    uint32_t k;
+    for (k = 0; k < NSTEP; k++) {
+        uint32_t f = 0;
+        if (k == 0 || rnd(100) >= 25u) {        /* a note (else a rest) */
+            uint32_t r = rnd(100), d = 0, tries;
+            f = 1u;
+            if (rnd(100) < 20u) f |= 2u;        /* slide */
+            if (rnd(100) < 25u) f |= 4u;        /* accent */
+            if (k == 0 || r < 30u) d = 0;       /* the root .. */
+            else if (r < 45u) d = 12;           /* .. its octave .. */
+            else                                /* .. or any note of the scale in the two octaves */
+                for (tries = 0; tries < 32u; tries++) {
+                    d = rnd(25);
+                    if (SCALE_MASK[scale] >> (d % 12u) & 1u) break;
+                }
+            step[k].note = (uint8_t)(root + d > 127u ? root : root + d);
+        } else
+            step[k].note = 0;
+        step[k].flags = (uint8_t)f;
     }
 }
 
@@ -497,22 +699,35 @@ static uint32_t white_key_id(uint32_t n)        /* physical key index of the n-t
 }
 
 /* The pattern as a strip of 16 cells right above the keyboard drawing, each over its own white key
- * (same x as draw_keys()): dark = rest, grey = a note, lilac = an accented note; a bar under a cell
- * running into the next one = a slide (legato into the next step); a white tick under it = the
+ * (same x as draw_keys()): dark = rest, pale = a note, pink = an accented note; a bar under a cell
+ * running into the next one = a slide (legato into the next step); a red tick under it = the
  * record cursor, or the step sounding while the pattern plays (the two never show at once). */
-#define C_EMPTY RGB(45, 45, 45)
+static const uint16_t TINY_VOW[NVOW] = {       /* i e a o u, 3 x 5 px, rows top down, 3 bits each */
+    0x2u << 12 | 0x0u << 9 | 0x2u << 6 | 0x2u << 3 | 0x2u,                               /* i */
+    0x2u << 12 | 0x5u << 9 | 0x7u << 6 | 0x4u << 3 | 0x3u,                               /* e */
+    0x6u << 12 | 0x1u << 9 | 0x3u << 6 | 0x5u << 3 | 0x3u,                               /* a */
+    0x0u << 12 | 0x2u << 9 | 0x5u << 6 | 0x5u << 3 | 0x2u,                               /* o */
+    0x0u << 12 | 0x5u << 9 | 0x5u << 6 | 0x5u << 3 | 0x3u,                               /* u */
+};
 static void draw_steps(const struct seq_step_s *step, int32_t mark)   /* mark: -1 = none */
 {
     uint32_t n;
-    cv_begin(240, 24, C_BLACK);
+    cv_begin(240, 24, C_BG);
     for (n = 0; n < NSTEP; n++) {
         int32_t x = 8 + (int32_t)n * 14;
         uint32_t f = step[n].flags;
         cv_rect(x, 0, 13, 15, !(f & 1u) ? C_EMPTY : f & 4u ? C_ACC : C_KEY);
+        if (STEP_VOW(f)) {                      /* its vowel, as a 3 x 5 pixel letter */
+            uint32_t r, c, g = TINY_VOW[STEP_VOW(f) - 1u];
+            for (r = 0; r < 5u; r++)
+                for (c = 0; c < 3u; c++)
+                    if (g >> (14u - r * 3u - c) & 1u)
+                        cv_rect(x + 5 + (int32_t)c, 5 + (int32_t)r, 1, 1, f & 1u ? C_BLK : C_KEY);
+        }
         if ((f & 3u) == 3u)
             cv_rect(x, 17, n + 1u < NSTEP ? 14 : 13, 3, C_KEY);
         if ((int32_t)n == mark)
-            cv_rect(x + 3, 21, 7, 3, C_WHITE);
+            cv_rect(x + 3, 21, 7, 3, C_LIT);
     }
     cv_blit(0, 116);
 }
@@ -524,19 +739,29 @@ static void draw_steps(const struct seq_step_s *step, int32_t mark)   /* mark: -
                                                   * touched_id would never leave its sentinel there) */
 static const char *const PNAME[] = {"SIZE", "RES", "VOICE", "CUTOFF", "X", "Y",
                                      "X RATE", "X DEPTH", "Y RATE", "Y DEPTH", "VOWEL", "BPM", "STEP",
-                                     "DECAY", "ENV MOD", "ACCENT", "AMP DECAY"};
+                                     "DECAY", "ENV MOD", "ACCENT", "AMP DECAY", "RANDOM", "SCALE", "ROOT", "STEP VOWEL"};
 static void draw_touched(uint32_t id, int32_t val)    /* last knob moved: name + value, replaces the
-                                                        * static subtitle once anything has been touched */
+                                                        * name shown at power-on */
 {
     char s[24], v[8];
     const char *p = PNAME[id];
     uint32_t i = 0, j;
+    static const char *const SCALE_NAME[NSCALE] = {"MIN PENTA", "MINOR", "PHRYGIAN", "DORIAN", "MAJOR", "CHROMATIC"};
     while (*p) s[i++] = (uint8_t)*p++;
     s[i++] = ' ';
-    fmt_int(v, val);
-    for (j = 0; v[j]; j++) s[i++] = v[j];
+    if (id == 18) {                             /* a scale by name, a root by note */
+        for (p = SCALE_NAME[val]; *p; ) s[i++] = *p++;
+    } else if (id == 19) {
+        note_name(v, (uint32_t)val);
+        for (j = 0; v[j]; j++) s[i++] = v[j];
+    } else if (id == 10 || id == 20) {          /* a vowel by letter; a step's: 0 = none, shown as - */
+        s[i++] = id == 20 && !val ? '-' : "ieaou"[id == 20 ? val - 1 : val];
+    } else {
+        fmt_int(v, val);
+        for (j = 0; v[j]; j++) s[i++] = v[j];
+    }
     s[i] = 0;
-    draw_text_box(0, 52, 240, &FONT_S, s, C_OFF, 1);
+    text_box(0, 199, 240, &FONT_S, s, C_TEXT);
 }
 #endif
 
@@ -545,21 +770,24 @@ static void draw_status(int32_t oct)
     char s[12] = "OCTAVE +0";
     s[7] = oct < 0 ? '-' : '+';
     s[8] = (char)('0' + (oct < 0 ? -oct : oct));
-    draw_text_box(0, 212, 240, &FONT_S, s, C_OFF, 1);
+    text_box(0, 220, 120, &FONT_S, s, C_DIMT);     /* the left half of the bottom line */
 }
 
 #ifndef DINGHY_HOST
-static void draw_isr(uint32_t now, uint32_t max)    /* app_audio() time, now/worst since boot, vs the
-                                                      * 2.9 ms safe half-budget from docs/RULES.md */
+static void draw_isr(uint32_t now, uint32_t max, uint32_t draw_ms)   /* app_audio() time in us, now/worst
+                                                      * since boot, vs the 2.9 ms safe half-budget from
+                                                      * docs/RULES.md; D = the slowest throat strip, ms */
 {
-    char s[24] = "ISR ", a[6], b[6];
+    char s[28] = "ISR ", a[6], b[6], c[6];
     uint32_t i = 4, j;
     fmt_int(a, (int32_t)now);
     fmt_int(b, (int32_t)max);
+    fmt_int(c, (int32_t)draw_ms);
     for (j = 0; a[j]; j++) s[i++] = a[j];
     s[i++] = '/'; for (j = 0; b[j]; j++) s[i++] = b[j];
-    s[i++] = 'u'; s[i++] = 's'; s[i] = 0;
-    draw_text_box(0, 224, 240, &FONT_S, s, max > 2900u ? C_ACC : C_OFF, 1);   /* lilac past the 2.9 ms safe half-budget */
+    s[i++] = ' '; s[i++] = 'D'; for (j = 0; c[j]; j++) s[i++] = c[j];
+    s[i] = 0;
+    text_box(120, 220, 120, &FONT_S, s, max > 2900u ? C_LIT : C_DIMT);   /* right half; red past the 2.9 ms safe half-budget */
 }
 #endif
 
@@ -621,9 +849,15 @@ static void app_main(void)
         int8_t oct;
         int16_t bpm;
         struct seq_step_s step[NSTEP];
+        uint8_t root, scale;                    /* the randomizer's: a MIDI note, an index into SCALE_MASK */
     } set = {0};
     uint32_t prev = 0, k, t_change = 0, dirty = 0, lit_drawn = ~0u, note_drawn = ~0u;
     uint32_t tap_pending = 0;                   /* GLO/ENV pressed, not yet used as a modifier */
+    uint32_t randoms = 0;                       /* ARP + PLAY presses, shown as RANDOM n */
+    int32_t thr_x = -100, thr_y = -100;         /* the throat as last drawn .. */
+    uint32_t thr_ms = 0, thr_row = THROAT_H;    /* .. when, and the next row of a frame being drawn */
+    int32_t thr_sway = 0;                       /* .. and the uvula's sway in it */
+    uint32_t uv_ms = 0;                         /* the uvula last redrawn on its own */
     int32_t oct_drawn = 99, mark_drawn = -2;
     uint8_t flags_drawn[NSTEP] = {0};           /* what draw_steps() last showed; mark_drawn -2 forces
                                                   * the first draw */
@@ -636,20 +870,30 @@ static void app_main(void)
     int32_t rec_step_drawn = -1;
 #endif
 #ifndef DINGHY_HOST
-    uint32_t isr_now_drawn = ~0u, isr_max_drawn = ~0u;
+    uint32_t isr_now_drawn = ~0u, isr_max_drawn = ~0u, thr_max_ms = 0, thr_max_drawn = ~0u, thr_t0 = 0;
+#define THR_T0 (thr_t0 = fm1_ticks())         /* time one throat strip, CPU and the wait for the last blit */
+#define THR_T1 do { uint32_t ms_ = (fm1_ticks() - thr_t0) / (FM1_TICKS_PER_US * 1000u); \
+                    if (ms_ > thr_max_ms) thr_max_ms = ms_; } while (0)
+#else
+#define THR_T0 ((void)0)
+#define THR_T1 ((void)0)
 #endif
     uint8_t held[27] = {0};                     /* the note each key plays */
     settings_load(&set, sizeof set);
     if (set.oct < -2 || set.oct > 2) set.oct = 0;
     if (set.bpm < 40 || set.bpm > 300) set.bpm = 120;
+    if (set.root < 24 || set.root > 108) set.root = 48;      /* C3 */
+    if (set.scale >= NSCALE) set.scale = 0;
 
-    lcd_fill(0, 0, 240, 240, C_BLACK);
-    draw_text_box(0, 18, 240, &FONT_L, APP_NAME, C_ACC, 1);
-    draw_text_box(0, 52, 240, &FONT_S, "formantsynth prototype  v" APP_VER, C_OFF, 1);
+    lcd_fill(0, 0, 240, 240, C_BG);
+    text_box(0, 199, 240, &FONT_S, APP_NAME "  v" APP_VER, C_TEXT);   /* until a knob is touched */
 #ifndef DINGHY_HOST
     led_dim(BTN_LFO, 1);                        /* soft glow, always -- fm1_led_key(BTN_LFO, ...) above
                                                   * goes full bright on top of it while held */
     led_dim(BTN_ENV, 1);                        /* same: always does something (the envelope knobs) */
+    led_dim(BTN_SEQ, 1);                        /* and SEQ (+ SELECT: the tempo) .. */
+    led_dim(BTN_ARP, 1);                        /* .. and ARP: the randomizer's shift (random pattern,
+                                                  * root, scale) */
                                                 /* BTN_GLO glows only in record mode, where it does
                                                   * something: set per pass in the main loop below */
     fm1_led_bg_ns = 16000u;                     /* the shared pulse width for led_bg()'s middle tier --
@@ -672,9 +916,16 @@ static void app_main(void)
                 play(held[k], 100);                 /* always sounds live, recording or not -- you hear
                                                       * what you're entering */
                 midi_send(0x90, held[k], 100);
-                if (rec_mode) {                     /* record into the cursor step, then advance it */
+                if (fm1_in.buttons & (1u << BTN_ARP)) {  /* ARP + a key: the randomizer's root, and a
+                                                      * pattern on it right away (not recorded) */
+                    set.root = held[k];
+                    seq_randomize(set.step, set.root, set.scale);
+                    dirty = 1; t_change = fm1_ms;
+                    touched_id = 19; touched_val = set.root;
+                } else if (rec_mode) {              /* record into the cursor step, then advance it */
                     set.step[rec_step].note = held[k];
-                    set.step[rec_step].flags = (uint8_t)(1u | (fm1_in.buttons & (1u << BTN_GLO) ? 2u : 0u)
+                    set.step[rec_step].flags = (uint8_t)((set.step[rec_step].flags & 0x38u)   /* keeps its vowel */
+                                                            | 1u | (fm1_in.buttons & (1u << BTN_GLO) ? 2u : 0u)
                                                             | (fm1_in.buttons & (1u << BTN_ENV) ? 4u : 0u));
                     rec_step = (int32_t)((rec_step + 1) % (int32_t)NSTEP);
                     tap_pending = 0;                /* GLO/ENV held through this: a modifier, not a tap */
@@ -715,7 +966,12 @@ static void app_main(void)
             else if (rec_step_drawn >= 0) { led_dim(KEY_LED(white_key_id((uint32_t)rec_step_drawn)), 0); rec_step_drawn = -1; }
 #endif
         }
-        if (b & (1u << BTN_PLAY) && !rec_mode) {   /* toggle the sequencer; can't run while recording */
+        if (b & (1u << BTN_PLAY) && (fm1_in.buttons & (1u << BTN_ARP))) {  /* ARP + PLAY: a random pattern,
+                                                   * playing on as it was -- heard from the next step */
+            seq_randomize(set.step, set.root, set.scale);
+            dirty = 1; t_change = fm1_ms;
+            touched_id = 17; touched_val = (int32_t)++randoms;
+        } else if (b & (1u << BTN_PLAY) && !rec_mode) {   /* toggle the sequencer; can't run while recording */
             seq_running = !seq_running;
             if (seq_running) { seq_step = 0; seq_next_ms = fm1_ms; }
             else seq_halt();
@@ -744,9 +1000,15 @@ static void app_main(void)
             if (lfo) knob(&par.lfoYDepth, d, 20, 0, 1000, 9); else if (env) knob(&par.ampdec, d, 20, 0, 1000, 16);
             else knob(&par.cutoff, d, 20,    0, 1000, 3);
             knob(&par.x, fm1_enc_take(ENC_ALGORITHM), 20, 0, 1000, 4);
-            d = fm1_enc_take(ENC_SELECT);        /* Y normally; steps while recording; tempo under SEQ */
+            d = fm1_enc_take(ENC_SELECT);        /* Y normally; steps while recording; tempo under SEQ;
+                                                   * the randomizer's scale under ARP */
             if (d) {
-                if (rec_mode) {
+                if (fm1_in.buttons & (1u << BTN_ARP)) {
+                    int32_t sc = (int32_t)set.scale + (d > 0 ? 1 : -1);
+                    set.scale = (uint8_t)(sc < 0 ? 0 : sc >= (int32_t)NSCALE ? (int32_t)NSCALE - 1 : sc);
+                    dirty = 1; t_change = fm1_ms;
+                    touched_id = 18; touched_val = set.scale;
+                } else if (rec_mode) {
                     rec_step += d;
                     tap_pending = 0;
                     if (rec_step < 0) rec_step = 0; else if (rec_step >= (int32_t)NSTEP) rec_step = (int32_t)NSTEP - 1;
@@ -760,8 +1022,15 @@ static void app_main(void)
                     knob(&par.y, d, 20, 0, 1000, 5);
                 }
             }
-            d = fm1_enc_take(ENC_PRESETS);
-            if (d) {
+            d = fm1_enc_take(ENC_PRESETS);       /* a reference vowel; in record mode the cursor step's */
+            if (d && rec_mode) {
+                int32_t v = (int32_t)STEP_VOW(set.step[rec_step].flags) + (d > 0 ? 1 : -1);
+                v = v < 0 ? 0 : v > (int32_t)NVOW ? (int32_t)NVOW : v;
+                set.step[rec_step].flags = (uint8_t)((set.step[rec_step].flags & ~0x38u) | (uint32_t)v << 3);
+                tap_pending = 0;
+                dirty = 1; t_change = fm1_ms;
+                touched_id = 20; touched_val = v;
+            } else if (d) {
                 vowel_sel += d;
                 if (vowel_sel < 0) vowel_sel = 0; else if (vowel_sel >= (int32_t)NVOW) vowel_sel = (int32_t)NVOW - 1;
                 par.x = vowel_x[vowel_sel]; par.y = vowel_y[vowel_sel];
@@ -821,6 +1090,8 @@ static void app_main(void)
         fm1_led_key(BTN_OCT_UP, set.oct > 0);
         fm1_led_key(BTN_REC, rec_mode);
         fm1_led_key(BTN_PLAY, seq_running);
+        if (rec_mode) vow_lock = (int32_t)STEP_VOW(set.step[rec_step].flags);   /* hear and see the step */
+        else if (!seq_running) vow_lock = 0;
 #ifndef DINGHY_HOST
         if (rec_mode && rec_step != rec_step_drawn) {   /* the cursor's own soft glow among the step LEDs */
             if (rec_step_drawn >= 0) led_dim(KEY_LED(white_key_id((uint32_t)rec_step_drawn)), 0);
@@ -842,13 +1113,48 @@ static void app_main(void)
         }
 #endif
 #ifndef DINGHY_HOST
+        fm1_led_key(BTN_SEQ, (fm1_in.buttons & (1u << BTN_SEQ)) != 0);
+        fm1_led_key(BTN_ARP, (fm1_in.buttons & (1u << BTN_ARP)) != 0);
         fm1_led_key(BTN_LFO, (fm1_in.buttons & (1u << BTN_LFO)) != 0);   /* full bright while held; the
                                                                           * constant soft glow (set once,
                                                                           * below) shows through otherwise */
 #endif
 
         if (lit != lit_drawn) { lit_drawn = lit; draw_keys(lit); }   /* redraw only what changed */
-        if (last_note != note_drawn) { note_drawn = last_note; draw_note(); }
+        {                                        /* the throat: redrawn when the vowel (with the LFOs)
+                                                   * or the note changes, at most ~20 times a second (a
+                                                   * frame is ~22 ms of SPI at 20 MHz), in 16-row chunks,
+                                                   * each started only once the LCD has sent the last
+                                                   * one -- so the main loop (and the sequencer in it)
+                                                   * never waits for the throat */
+            int32_t vl = vow_lock;
+            int32_t ex = (vl ? vowel_x[vl - 1] : par.x) + sine(*(volatile uint32_t *)&lfoXPh) * par.lfoXDepth / 32767;
+            int32_t ey = (vl ? vowel_y[vl - 1] : par.y) + sine(*(volatile uint32_t *)&lfoYPh) * par.lfoYDepth / 32767;
+            uint32_t ut_ = fm1_ms - uv_kick_ms;
+            int32_t sway = 0;                    /* after an accent: ~2.5 swings at 8 Hz, 5 px at first,
+                                                   * dying away over 300 ms */
+            ex = ex < 0 ? 0 : ex > 1000 ? 1000 : ex;
+            ey = ey < 0 ? 0 : ey > 1000 ? 1000 : ey;
+            if (ut_ < 300u)
+                sway = 5 * sine(ut_ * 34359738u) * (int32_t)(300u - ut_) / (32767 * 300);
+            if (thr_row >= THROAT_H && (ex - thr_x > 7 || thr_x - ex > 7 || ey - thr_y > 7 || thr_y - ey > 7
+                                        || last_note != note_drawn) && fm1_ms - thr_ms >= 50u) {
+                thr_x = ex; thr_y = ey; note_drawn = last_note; thr_ms = fm1_ms;   /* a new frame */
+                thr_sway = sway;
+                thr_row = 0;
+            }
+            if (thr_row < THROAT_H && lcd_idle()) {
+                uint32_t h = THROAT_H - thr_row < 16u ? THROAT_H - thr_row : 16u;
+                THR_T0;
+                draw_throat(0, 240, thr_row, h, thr_x, thr_y, note_drawn, thr_sway);
+                THR_T1;
+                thr_row += h;
+            } else if (thr_row >= THROAT_H && sway != thr_sway && fm1_ms - uv_ms >= 30u && lcd_idle()) {
+                thr_sway = sway;                 /* between frames: only the uvula's corner, 48 x 56 px */
+                uv_ms = fm1_ms;
+                draw_throat(96, 48, 0, 56, thr_x, thr_y, note_drawn, thr_sway);
+            }
+        }
         if (set.oct != oct_drawn) { oct_drawn = set.oct; draw_status(set.oct); }
         {
             int32_t mark = rec_mode ? rec_step
@@ -865,13 +1171,17 @@ static void app_main(void)
         }
 #endif
 #ifndef DINGHY_HOST
-        if (dbg_us_now != isr_now_drawn || dbg_us_max != isr_max_drawn) {
+        if (dbg_us_now != isr_now_drawn || dbg_us_max != isr_max_drawn || thr_max_ms != thr_max_drawn) {
+            thr_max_drawn = thr_max_ms;
             isr_now_drawn = dbg_us_now; isr_max_drawn = dbg_us_max;
-            draw_isr(isr_now_drawn, isr_max_drawn);
+            draw_isr(isr_now_drawn, isr_max_drawn, thr_max_drawn);
         }
 #endif
 
-        if (dirty && quiet() && fm1_ms - t_change > 2000u) {   /* 2 s after the change, when silent (an erase stalls the sound) */
+        if (dirty && !seq_running && quiet() && fm1_ms - t_change > 2000u) {   /* 2 s after the change, when silent
+                                                   * (an erase stalls the sound) and not playing: the gaps
+                                                   * between a pattern's notes are silent too, and a stall
+                                                   * there would break the groove */
             settings_save(&set, sizeof set);
             dirty = 0;
         }
