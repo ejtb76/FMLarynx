@@ -9,8 +9,14 @@ LFOs, and play it from the keys, over USB-MIDI, or from a built-in 303-style 16-
 It is a port of FormantSynth, a VST3 plugin, to the FM-1's chip, and is built on
 [Dinghy](https://github.com/zvenson/dinghy) by zvenson.
 
-> **Status: prototype, runs on the FM-1.** Tested on the device: the sound engine, all knobs, both LFOs, the
-> sequencer and its LEDs, the pattern kept in flash.
+<p align="center"><img src="docs/screen.png" width="240" alt="FMLarynx's screen: a throat whose opening follows the vowel, the note in it, the step strip and the keyboard"></p>
+
+> **Status: 0.1, runs on the FM-1.** Tested on the device: the sound engine, all controls, the sequencer with its
+> randomizer and stored patterns, the effects, the screen, and updating over USB.
+
+**What it keeps:** FMLarynx stores its patterns and settings in the FM-1's settings sector, the place Felucca,
+SLOOP, Dinghy and their relatives use for theirs: after one of them has run, FMLarynx starts from its defaults again
+(and the other way round). It does not read other firmwares' projects or samples.
 
 **Package identity:** `FM-1_93N`, with N the minor version (release 0.1 is `FM-1_931`); development builds are
 `FM-1_939`.
@@ -186,10 +192,12 @@ off, so your last changes are saved.
 
 ## Installing
 
-Installing custom firmware is at your own risk. You can always go back to the official firmware or another one with
-the [FM-1 Firmware Hub](https://fm1.designburgapps.com) in Chrome or Edge.
+Installing custom firmware is at your own risk. The easy way is the [FM-1 Firmware Hub](https://thefirmwarehub.com)
+in Chrome or Edge: it installs a release in one click, and takes you back to the official firmware or to another one
+the same way. Or download the `.fwsc` from this repository's
+[releases](https://github.com/ejtb76/FMLarynx/releases).
 
-Build it, then install over USB:
+To build it yourself, then install over USB:
 
 ```sh
 ./build.sh                                       # -> build/fmlarynx.fwsc
@@ -225,7 +233,7 @@ build checks for you.
 GPL-3.0-only: you may change and share it, and whoever gets a firmware built from it gets its source too. Details
 and third-party parts in [LICENSING.md](LICENSING.md).
 
-- **FMLarynx** (the formant synth, sequencer and controls in `dinghy.c`): Erik Jan ten Brinke
+- **FMLarynx** (the formant synth, sequencer, screen and effects in `dinghy.c`): Presethead
 - **[Dinghy](https://github.com/zvenson/dinghy)** (the app skeleton, the wiring `platform.c`, host mode, docs): zvenson
 - **The platform:** Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
   ([Felucca](https://github.com/hugelton/Felucca)), with the changes of [SLOOP](https://github.com/isod89/sloop-fm1)

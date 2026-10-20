@@ -898,19 +898,16 @@ static void draw_status(int32_t oct)
 }
 
 #ifndef DINGHY_HOST
-static void draw_isr(uint32_t now, uint32_t max, uint32_t draw_ms)   /* app_audio() time in us, now/worst
-                                                      * since boot, vs the 2.9 ms safe half-budget from
-                                                      * docs/RULES.md; D = the slowest throat strip, ms */
+static void draw_isr(uint32_t now, uint32_t max)    /* app_audio() time, now/worst since boot, vs the
+                                                      * 2.9 ms safe half-budget from docs/RULES.md */
 {
-    char s[28] = "ISR ", a[6], b[6], c[6];
+    char s[24] = "ISR ", a[6], b[6];
     uint32_t i = 4, j;
     fmt_int(a, (int32_t)now);
     fmt_int(b, (int32_t)max);
-    fmt_int(c, (int32_t)draw_ms);
     for (j = 0; a[j]; j++) s[i++] = a[j];
     s[i++] = '/'; for (j = 0; b[j]; j++) s[i++] = b[j];
-    s[i++] = ' '; s[i++] = 'D'; for (j = 0; c[j]; j++) s[i++] = c[j];
-    s[i] = 0;
+    s[i++] = 'u'; s[i++] = 's'; s[i] = 0;
     text_box(120, 220, 120, &FONT_S, s, max > 2900u ? C_LIT : C_DIMT);   /* right half; red past the 2.9 ms safe half-budget */
 }
 #endif
@@ -999,13 +996,7 @@ static void app_main(void)
     int32_t rec_step_drawn = -1;
 #endif
 #ifndef DINGHY_HOST
-    uint32_t isr_now_drawn = ~0u, isr_max_drawn = ~0u, thr_max_ms = 0, thr_max_drawn = ~0u, thr_t0 = 0;
-#define THR_T0 (thr_t0 = fm1_ticks())         /* time one throat strip, CPU and the wait for the last blit */
-#define THR_T1 do { uint32_t ms_ = (fm1_ticks() - thr_t0) / (FM1_TICKS_PER_US * 1000u); \
-                    if (ms_ > thr_max_ms) thr_max_ms = ms_; } while (0)
-#else
-#define THR_T0 ((void)0)
-#define THR_T1 ((void)0)
+    uint32_t isr_now_drawn = ~0u, isr_max_drawn = ~0u;
 #endif
     uint8_t held[27] = {0};                     /* the note each key plays */
     settings_load(&set, sizeof set);
@@ -1351,9 +1342,7 @@ static void app_main(void)
             }
             if (thr_row < THROAT_H && lcd_idle()) {
                 uint32_t h = THROAT_H - thr_row < 16u ? THROAT_H - thr_row : 16u;
-                THR_T0;
                 draw_throat(0, 240, thr_row, h, thr_x, thr_y, note_drawn, thr_sway);
-                THR_T1;
                 thr_row += h;
             } else if (thr_row >= THROAT_H && sway != thr_sway && fm1_ms - uv_ms >= 30u && lcd_idle()) {
                 thr_sway = sway;                 /* between frames: only the uvula's corner, 48 x 56 px */
@@ -1377,10 +1366,9 @@ static void app_main(void)
         }
 #endif
 #ifndef DINGHY_HOST
-        if (dbg_us_now != isr_now_drawn || dbg_us_max != isr_max_drawn || thr_max_ms != thr_max_drawn) {
-            thr_max_drawn = thr_max_ms;
+        if (dbg_us_now != isr_now_drawn || dbg_us_max != isr_max_drawn) {
             isr_now_drawn = dbg_us_now; isr_max_drawn = dbg_us_max;
-            draw_isr(isr_now_drawn, isr_max_drawn, thr_max_drawn);
+            draw_isr(isr_now_drawn, isr_max_drawn);
         }
 #endif
 

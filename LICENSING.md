@@ -1,6 +1,6 @@
 # Licensing
 
-Dinghy is free software under the GNU General Public License, version 3 only (`GPL-3.0-only`, full text in
+FMLarynx, like Dinghy it is built on, is free software under the GNU General Public License, version 3 only (`GPL-3.0-only`, full text in
 `LICENSE`). You may use, study, change and share it. If you give someone a firmware built from it, give them its
 complete source under the same licence too.
 
@@ -9,7 +9,8 @@ complete source under the same licence too.
 | | |
 | --- | --- |
 | The platform: `firmware/hal/`, `firmware/loader/`, `crt0.S`, `app.ld`, `firmware/src/` (`usb.c`, `ota.c`, `recovery.c`, `lcd.c`, `gfx.c`, `libc.c`, `bootguard.h`, `uac_fir.h`), `tools/` | Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments ([Felucca](https://github.com/hugelton/Felucca)), with the changes of [SLOOP](https://github.com/isod89/sloop-fm1) (isod89) |
-| The app `firmware/src/dinghy.c`, the wiring `platform.c`, the host mode `tests/`, the docs | zvenson |
+| FMLarynx: the formant synth, sequencer, screen and effects in `firmware/src/dinghy.c`, and its changes to `platform.c`, `hal/fm1_lcd_hw.h`, `tests/host.c` and the docs | Presethead |
+| The app skeleton `firmware/src/dinghy.c` started from, the wiring `platform.c`, the host mode `tests/`, the docs | zvenson ([Dinghy](https://github.com/zvenson/dinghy)) |
 
 ## Third-party material
 
@@ -26,4 +27,4 @@ the GPL. It marks Dinghy itself; a fork uses its own logo.
 ## Trademarks
 
 "Felucca" and "Hügelton Instruments" are names of Hügelton Instruments; "M-VAVE" and "FM-1" belong to their
-owners. Dinghy is not made or endorsed by them.
+owners. FMLarynx is not made or endorsed by them.
