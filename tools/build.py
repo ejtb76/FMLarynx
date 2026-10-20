@@ -47,8 +47,9 @@ SDK_SHA256 = {
     "cfg/eq_cfg_hw.bin": "41167491bffed4651750719c973d2758adeb9021a5670d02d6a53c85ed80ea7d",
 }
 
-PRODUCT = "FM-1_939"                # FMLarynx: 93N, dev builds 939 (OUR_LOADER in the installer wants FM-1_9NN).
-                                    # 93x was free in the hub catalogue (2026-10) apart from 930, CoralFlower
+PRODUCT = "FM-1_984"                # FMLarynx's own, every build and release: no project on the Firmware Hub uses
+                                    # or claims 984 (2026-10; each 9N decade is claimed by someone, so no version
+                                    # digit in it), and the FM-1_9NN form lets the hub resume a cut-off update
 VERSION = None                      # APP_VER for release builds
 
 
@@ -271,17 +272,14 @@ def mmio_check():
 def main():
     global PRODUCT, VERSION
     ap = argparse.ArgumentParser()
-    ap.add_argument("--release", metavar="X.Y", help="release build: identity FM-1_93Y, version string X.Y")
+    ap.add_argument("--release", metavar="X.Y", help="release build: version string X.Y (the identity stays FM-1_984)")
     ap.add_argument("--sdk", type=Path, help="JieLi AC79 SDK checkout (default: $AC79_SDK)")
     a = ap.parse_args()
     name = "fmlarynx.fwsc"
-    if a.release:                   # one digit each: the identity has room for two (X.Y; a .Z only in the text)
+    if a.release:
         m = re.fullmatch(r"(\d)\.(\d)(\.\d)?(-[A-Za-z0-9]+)?", a.release)
         if not m:
             raise SystemExit(f"--release {a.release}: use X.Y, X.Y.Z or X.Y-suffix, one digit each")
-        if m[2] in "09":            # 930 is CoralFlower's, 939 our dev builds
-            raise SystemExit(f"--release {a.release}: the minor digit 0 or 9 would clash (FM-1_930/939), use 1..8")
-        PRODUCT = "FM-1_93" + m[2]
         VERSION = m[1] + "." + m[2] + (m[3] or "")
         name = f"fmlarynx-{a.release}.fwsc"
     fm1pkg_make.SDK = a.sdk

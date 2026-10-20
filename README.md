@@ -18,8 +18,7 @@ It is a port of FormantSynth, a VST3 plugin, to the FM-1's chip, and is built on
 SLOOP, Dinghy and their relatives use for theirs: after one of them has run, FMLarynx starts from its defaults again
 (and the other way round). It does not read other firmwares' projects or samples.
 
-**Package identity:** `FM-1_93N`, with N the minor version (release 0.1 is `FM-1_931`); development builds are
-`FM-1_939`.
+**Package identity:** `FM-1_984`, for every release.
 
 ## The sound
 
