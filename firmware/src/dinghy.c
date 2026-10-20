@@ -643,7 +643,7 @@ static void seq_trigger(const struct seq_step_s *s)   /* shared by the internal 
 
 /* ARP + PLAY: a random pattern, acid style -- notes from the chosen scale over the chosen root, two
  * octaves up, the root and its octave the most likely; step 1 always the root, so the groove has an
- * anchor; about a quarter rests, a fifth slides, a quarter accents. ARP + a key picks the root (and
+ * anchor; about a quarter rests, a fifth slides, a quarter accents, and ~30% of the notes a vowel. ARP + a key picks the root (and
  * makes a pattern on it), ARP + SELECT the scale. (ARP, not SEQ: SEQ sits right next to PLAY.) Plain xorshift, seeded by the free-running tick
  * counter at the first press, so every power-on gives other patterns. */
 #define NSCALE 6u
@@ -672,6 +672,8 @@ static void seq_randomize(struct seq_step_s *step, uint32_t root, uint32_t scale
             f = 1u;
             if (rnd(100) < 20u) f |= 2u;        /* slide */
             if (rnd(100) < 25u) f |= 4u;        /* accent */
+            if (rnd(100) < 30u) f |= (1u + rnd(NVOW)) << 3;   /* a vowel lock on ~30%: most steps
+                                                   * still follow the knobs and the LFOs */
             if (k == 0 || r < 30u) d = 0;       /* the root .. */
             else if (r < 45u) d = 12;           /* .. its octave .. */
             else                                /* .. or any note of the scale in the two octaves */
@@ -737,8 +739,9 @@ static void draw_steps(const struct seq_step_s *step, int32_t mark)   /* mark: -
                                                   * and doesn't pull it in -- and the host build's
                                                   * fm1_enc_take() stub always returns 0 anyway, so
                                                   * touched_id would never leave its sentinel there) */
-static const char *const PNAME[] = {"SIZE", "RES", "VOICE", "CUTOFF", "X", "Y",
-                                     "X RATE", "X DEPTH", "Y RATE", "Y DEPTH", "VOWEL", "BPM", "STEP",
+static const char *const PNAME[] = {"SIZE", "RES", "VOICE", "CUTOFF", "TONGUE", "JAW",   /* X: the tongue,
+                                                                 * front..back; Y: the jaw, closed..open */
+                                     "TONGUE RATE", "TONGUE DEPTH", "JAW RATE", "JAW DEPTH", "VOWEL", "BPM", "STEP",
                                      "DECAY", "ENV MOD", "ACCENT", "AMP DECAY", "RANDOM", "SCALE", "ROOT", "STEP VOWEL"};
 static void draw_touched(uint32_t id, int32_t val)    /* last knob moved: name + value, replaces the
                                                         * name shown at power-on */

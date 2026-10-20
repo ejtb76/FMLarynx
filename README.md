@@ -21,15 +21,16 @@ One voice, three formants:
 
 - **Source:** a sawtooth, harmonically rich, with a short attack (~5 ms) and release (~45 ms).
 - **Filter:** three resonant band-pass filters in parallel, tuned to the first three formants (F1, F2, F3) of a vowel.
-- **Vowel plane:** the five vowels **i, e, a, o, u** sit on an X/Y plane. Anywhere between them, the formant
-  frequencies blend smoothly, so turning X and Y morphs one vowel into the next.
+- **Vowel plane:** the five vowels **i, e, a, o, u** sit on a plane of the two things your mouth does for a vowel:
+  **Tongue** (front for i and e, back for o and u) and **Jaw** (closed for i and u, wide open for a). Anywhere
+  between them, the formant frequencies blend smoothly, so turning Tongue and Jaw morphs one vowel into the next.
 
   ```
-  Y
-  1.0          a
-  0.5    e           o
-  0.0    i           u
-        0.0   0.5   1.0  X
+  Jaw
+  open         a
+         e           o
+  closed i           u
+       front       back   Tongue
   ```
 
 - **Voice:** moves the formants from an adult male vocal tract to a female/child one.
@@ -48,7 +49,7 @@ Everything runs in integer maths (the chip has no FPU); the audio routine uses w
 
 The top of the screen looks down a throat: rings of flesh from pink to deep red, the uvula hanging from above, the
 tongue below, teeth along the edge, and the note you play in the opening. The opening follows the vowel: tall and
-wide for "a", a flat slit for "i", small and round for "u", and everything in between as you turn X and Y or the
+wide for "a", a flat slit for "i", small and round for "u", and everything in between as you turn Tongue and Jaw or the
 LFOs move them. On an accent the uvula wobbles.
 
 Below it: the step strip (see the sequencer), the keyboard with the keys that sound, the last control you turned with
@@ -63,19 +64,19 @@ the envelope controls for as long as you hold them.
 
 | Control | Normally | While holding **LFO** | While holding **ENV** |
 | --- | --- | --- | --- |
-| **KNOB 1** | Size, 500 to 2000 (0.5x to 2x) | LFO X rate, 0 to 1000 (0 to 8 Hz) | Decay, 0 to 1000 (30 ms to 2 s) |
-| **KNOB 2** | Resonance, 10 to 500 (Q 1 to 50) | LFO X depth, 0 to 1000 | Env Mod, 0 to 1000 |
-| **KNOB 3** | Voice, 0 to 1000 (male to female/child) | LFO Y rate, 0 to 1000 (0 to 8 Hz) | Accent amount, 0 to 1000 |
-| **KNOB 4** | Cutoff, 0 to 1000 (60 Hz to open) | LFO Y depth, 0 to 1000 | Amp Decay, 0 to 1000 (30 ms to 2 s; 1000 holds) |
-| **ALGORITHM** | Vowel X, 0 to 1000 | | |
-| **SELECT** | Vowel Y, 0 to 1000 (see the sequencer for its other jobs) | | |
+| **KNOB 1** | Size, 500 to 2000 (0.5x to 2x) | Tongue LFO rate, 0 to 1000 (0 to 8 Hz) | Decay, 0 to 1000 (30 ms to 2 s) |
+| **KNOB 2** | Resonance, 10 to 500 (Q 1 to 50) | Tongue LFO depth, 0 to 1000 | Env Mod, 0 to 1000 |
+| **KNOB 3** | Voice, 0 to 1000 (male to female/child) | Jaw LFO rate, 0 to 1000 (0 to 8 Hz) | Accent amount, 0 to 1000 |
+| **KNOB 4** | Cutoff, 0 to 1000 (60 Hz to open) | Jaw LFO depth, 0 to 1000 | Amp Decay, 0 to 1000 (30 ms to 2 s; 1000 holds) |
+| **ALGORITHM** | Tongue, 0 to 1000 (front to back) | | |
+| **SELECT** | Jaw, 0 to 1000 (closed to open; see the sequencer for its other jobs) | | |
 | **PRESETS** | Jump to a vowel: i, e, a, o, u (in record mode: the cursor step's vowel) | | |
 | **MASTER** | Volume | | |
 
 At power-on: Cutoff open, Env Mod 0, Decay 500, Accent 1000, Amp Decay 1000, so the envelope is out of the way
 until you dial it in.
 
-LFO X moves the vowel along X, LFO Y along Y, each around where the encoders put it. The screen shows the name and
+The tongue LFO moves the tongue, the jaw LFO the jaw, each around where the encoders put it. The screen shows the name and
 value of the last control you turned.
 
 ### Buttons and keys
@@ -114,7 +115,7 @@ press a key or turn SELECT while holding it.
 
 **A vowel per step:** in record mode, turn **PRESETS** to give the cursor step its own vowel (**-**, i, e, a, o, u;
 **-** = none). There is nothing to confirm: the step has it as you turn, and the throat shows it. While the pattern
-plays, a step with a vowel glides there; steps without one follow the X/Y knobs, and the LFOs work on top of both.
+plays, a step with a vowel glides there; steps without one follow the Tongue and Jaw knobs, and the LFOs work on top of both.
 Recording a note over a step keeps its vowel; **SEL** clears it with the rest.
 
 **Notes and slides, as on a 303:** a note sounds for half its step, then lets go. A slide on a step holds its note
@@ -147,7 +148,8 @@ While the pattern plays, **GLO** and **ENV** light up on every step that has a s
 - turn **SELECT**: the scale, one of MIN PENTA, MINOR, PHRYGIAN, DORIAN, MAJOR, CHROMATIC.
 
 The notes come from the scale over the root, two octaves up, with the root and its octave the most likely; step 1 is
-always the root. About a quarter of the steps are rests, a fifth slides and a quarter accents. Root and scale are
+always the root. About a quarter of the steps are rests, a fifth slides and a quarter accents, and about 30% of the notes get a vowel
+of their own (the rest follow the knobs and the LFOs). Root and scale are
 kept with the pattern.
 
 **MIDI clock:** when a DAW or another device sends MIDI clock over USB, the sequencer follows it, and MIDI
