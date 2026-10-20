@@ -152,7 +152,51 @@ static struct {
                                                   * decay 30 ms..2 s; envmod how far the envelope opens
                                                   * Size (up to 2x); accent scales the accent; ampdec the
                                                   * volume's decay, 1000 = none (holds, as before) */
-} par = {500, 500, 1000, 80, 0, 1000, 0, 0, 0, 0, 500, 0, 1000, 1000};
+    int32_t drive, dlydiv, dlyfb, dlymix;       /* the effects (under BTN_FX): drive pm, the delay time
+                                                  * as an index into DLY_16THS, feedback pm, wet level pm */
+} par = {500, 500, 1000, 80, 0, 1000, 0, 0, 0, 0, 500, 0, 1000, 1000, 0, 2, 400, 0};
+
+/* ---- effects, after the voice: Drive (a soft clipper, as a distortion pedal after a 303) and a
+ * tempo-synced ping-pong Delay -- the echoes alternate left and right, each darker than the last,
+ * like a dub tape delay. The delay runs on even when the voice has gone quiet, so its tail rings
+ * out. Two 32768-frame lines (0.74 s) of 16-bit, 128 KB, in the large .pool RAM. */
+#define DLY_N 32768u
+static int16_t dly_l[DLY_N] __attribute__((section(".pool")));
+static int16_t dly_r[DLY_N] __attribute__((section(".pool")));
+static const uint8_t DLY_16THS[5] = {1, 2, 3, 4, 6};   /* 1/16, 1/8, 3/16 (the acid classic), 1/4, 3/8 */
+static uint32_t dly_pos;
+static volatile uint32_t dly_len = 16537;       /* frames; set by the main loop from the tempo */
+static int32_t dly_fl, dly_fr;                  /* the feedback paths' low-pass state */
+
+static int32_t drive_px(int32_t s)              /* Drive: up to 32x into a cubic soft clip, with makeup */
+{
+    int32_t x = (s * (256 + par.drive * 31 * 256 / 1000)) >> 8, t;
+    const int32_t L = 32767, X = 49150;         /* the clip: x - 4x^3/(27 L^2) is flat at 1.5 L = L */
+    if (x > X) x = X; else if (x < -X) x = -X;
+    t = (int32_t)((((int64_t)x * x) >> 15) * x >> 15);   /* x^3 / L^2: a 64-bit product, no 64-bit divide */
+    x -= 4 * t / 27;
+    (void)L;
+    return x * (1000 - par.drive * 6 / 10) / 1000;
+}
+
+static int16_t sat16(int32_t v) { return (int16_t)(v > 32767 ? 32767 : v < -32767 ? -32767 : v); }
+
+static void delay_px(int32_t *out, uint32_t n)   /* out: stereo, the voice already in it (L = R) */
+{
+    uint32_t i, len = dly_len;
+    int32_t fb = par.dlyfb * 900 / 1000, mix = par.dlymix;   /* feedback capped at 0.9: no runaway */
+    for (i = 0; i < n; i++) {
+        uint32_t r = (dly_pos - len) & (DLY_N - 1u);
+        int32_t l = dly_l[r], rr = dly_r[r];
+        dly_fl += ((rr - dly_fl) * 14745) >> 15;   /* each echo a bit darker: one-pole, k = 0.45 */
+        dly_fr += ((l - dly_fr) * 14745) >> 15;
+        dly_l[dly_pos] = sat16(out[2u * i] + dly_fl * fb / 1000);   /* in on the left .. */
+        dly_r[dly_pos] = sat16(dly_fr * fb / 1000);                 /* .. across to the right */
+        out[2u * i] += l * mix / 1000;
+        out[2u * i + 1u] += rr * mix / 1000;
+        dly_pos = (dly_pos + 1u) & (DLY_N - 1u);
+    }
+}
 
 /* The envelope (TB-303 style): every new note (not a slide, which carries on) restarts it at full;
  * it decays once per block, mod_env opening Size by envmod, amp_env fading the volume. play()
@@ -241,7 +285,9 @@ static int32_t formant(int32_t x, const int32_t cb0[NB], const int32_t cb2[NB],
          * anywhere, docs/RULES.md). Each band's own output narrows back to the Q15 sample range right
          * after, so the per-band sum below (out) never needs to be anything but int32. */
         int32_t y = (int32_t)(((int64_t)cb0[b] * x + (int64_t)cb2[b] * x2
-                               - (int64_t)ca1[b] * y1 - (int64_t)ca2[b] * y2) >> CQ);
+                               - (int64_t)ca1[b] * y1 - (int64_t)ca2[b] * y2 + (1 << (CQ - 1))) >> CQ);
+                                                 /* rounded, not floored: a floor biases the feedback and
+                                                  * leaves the band stuck at a small negative value */
         fz2x[b] = x1; fz1x[b] = x;
         fz2y[b] = y1; fz1y[b] = y;
         out += y;
@@ -258,6 +304,8 @@ static int32_t formant(int32_t x, const int32_t cb0[NB], const int32_t cb2[NB],
 static volatile uint32_t dbg_us_now, dbg_us_max;
 #endif
 
+static uint32_t quiet_blocks;                   /* blocks since the voice went silent */
+
 static void app_audio(int32_t *out, uint32_t n)
 {
     uint32_t i;
@@ -266,8 +314,9 @@ static void app_audio(int32_t *out, uint32_t n)
     int32_t cb0[NB], cb2[NB], ca1[NB], ca2[NB];
     int32_t resGain, rg, rg_step, ae, ae_step;
     static int32_t rg_last = 256;               /* last block's resonance gain, Q8 */
-    static int32_t lp1, lp2, lk_last = 16384;   /* the Cutoff low-pass: state, last block's factor */
-    int32_t lk, lk_step;
+    static int32_t sv_low, sv_band;             /* the Cutoff filter's state */
+    static int32_t sv_f_last = 16384, sv_q_last = 23170, sv_w_last;   /* last block's f, q (Q14), wet (Q15) */
+    int32_t sv_f, sv_f_step, sv_q, sv_q_step, sv_w, sv_w_step, sv_comp;
 #ifndef DINGHY_HOST
     uint32_t t0 = fm1_ticks();
 #endif
@@ -282,17 +331,22 @@ static void app_audio(int32_t *out, uint32_t n)
             int32_t y1 = fz1y[b] < 0 ? -fz1y[b] : fz1y[b], y2 = fz2y[b] < 0 ? -fz2y[b] : fz2y[b];
             if (y1 > 2 || y2 > 2) ring = 1;
         }
-        if (lp2 > 2 || lp2 < -2) ring = 1;
+        if (sv_low > 2 || sv_low < -2 || sv_band > 2 || sv_band < -2) ring = 1;
+        if (++quiet_blocks > 40u) ring = 0;     /* ~230 ms on: whatever is left is a fixed-point residue,
+                                                  * not a ring (even Q 50 has died away by then) */
         if (!ring) {                            /* silent: costs nothing; start the next note from rest */
             for (b = 0; b < NB; b++) fz1x[b] = fz2x[b] = fz1y[b] = fz2y[b] = 0;
-            lp1 = lp2 = 0;
-            return;
+            sv_low = sv_band = 0;
+            goto effects;                       /* only the delay's tail, if any */
         }
-    }
+    } else
+        quiet_blocks = 0;
     ae = amp_env;                                /* Amp Decay: a ramp across the block from where it
                                                    * was, so a restart fades up instead of jumping */
     if (env_trig) { env_trig = 0; mod_env = 32767; amp_env = 32767; }   /* a new note: restart */
     if (par.ampdec < 1000) amp_env = (amp_env * decay_coef(par.ampdec)) >> 15;
+    if (quiet_blocks > 24u) amp_env >>= 1;      /* silent a while: fade out what still rings, so the
+                                                  * reset at 40 blocks has nothing left to cut off */
     ae_step = (amp_env - ae) / (int32_t)n;
     formant_update_coeffs(cb0, cb2, ca1, ca2);   /* control rate: once per 256-frame block */
     resGain = res_gain_q8[res_eff / 10];         /* resonance volume compensation, see the table above */
@@ -302,16 +356,23 @@ static void app_audio(int32_t *out, uint32_t n)
     rg_last = resGain;
     {                                            /* Cutoff (TB-303 style): log2 Hz in Q8, 60 Hz (1512)
                                                    * .. 18 kHz across the knob, Env Mod adding up to 4
-                                                   * octaves (1024); from ~16 kHz up the filter is off */
+                                                   * octaves (1024). A Chamberlin state variable low-pass
+                                                   * (12 dB/octave) run twice a frame, so it stays stable
+                                                   * up to ~15 kHz; its Q follows RES -- 0.7 .. 8 over the
+                                                   * knob's range, an accent's boost included, one
+                                                   * resonance as on a 303 -- and from ~13 kHz up it fades
+                                                   * out to nothing, so a fully open Cutoff is untouched */
         int32_t l2 = 1512 + par.cutoff * 2107 / 1000 + ((par.envmod * 1024 / 1000) * mod_env >> 15);
-        int32_t k = 16384;                       /* Q14: 1 = passes everything */
-        if (l2 < 3584) {
-            int32_t w = exp2_fixed(l2) * 4669 / 1000;   /* 2 pi fc / fs, Q15 */
-            k = (w << 14) / (32768 + w);         /* one-pole factor w / (1 + w), stays below 1 */
-        }
-        lk = lk_last << 8;                       /* ramped across the block like rg */
-        lk_step = ((k - lk_last) << 8) / (int32_t)n;
-        lk_last = k;
+        int32_t fc = exp2_fixed(l2 < 3584 ? l2 : 3584), qx10 = 7 + (res_eff - 10) * 73 / 490;
+        int32_t f = sine((uint32_t)fc * 24348u); /* 2 sin(pi fc / 2 fs) in Q14 (sine() is Q15) */
+        int32_t q = 163840 / qx10;               /* 1/Q, Q14 */
+        int32_t w = l2 <= 3400 ? 32767 : l2 >= 3584 ? 0 : (3584 - l2) * 32767 / 184;
+        if (f > 16384) f = 16384;                /* the stability edge at the lowest Q */
+        sv_comp = 32768 * 150 / (143 + qx10);    /* a little less level as Q rises (0.68x at the top): the
+                                                  * peak grows, the body below the cutoff doesn't */
+        sv_f = sv_f_last << 8; sv_f_step = ((f - sv_f_last) << 8) / (int32_t)n; sv_f_last = f;
+        sv_q = sv_q_last << 8; sv_q_step = ((q - sv_q_last) << 8) / (int32_t)n; sv_q_last = q;
+        sv_w = sv_w_last << 8; sv_w_step = ((w - sv_w_last) << 8) / (int32_t)n; sv_w_last = w;
     }
     if (!voice[0].glide) step = tgt;
     for (i = 0; i < n; i++) {
@@ -330,22 +391,39 @@ static void app_audio(int32_t *out, uint32_t n)
                                                    * wouldn't show off formant filtering at all */
         saw = (saw * amp) >> 15;                /* envelope the excitation, then resonate it */
         s = formant(saw, cb0, cb2, ca1, ca2);
-        lp1 += ((s - lp1) * (lk >> 8)) >> 14;   /* Cutoff: two one-poles, 12 dB/octave; |s| <= 32767
-                                                   * here, so the products fit an int32 in Q14 */
-        lp2 += ((lp1 - lp2) * (lk >> 8)) >> 14;
-        lk += lk_step;
-        s = lp2;
+        if (sv_w > 0 || sv_low || sv_band) {    /* Cutoff: the SVF, twice (2x oversampled), blended in
+                                                   * by sv_w; 64-bit products, the band can ring to ~Q x */
+            int32_t fi = sv_f >> 8, qi = sv_q >> 8, it, y;
+            for (it = 0; it < 2; it++) {
+                int32_t hp;
+                sv_low += (int32_t)(((int64_t)fi * sv_band) >> 14);
+                hp = s - sv_low - (int32_t)(((int64_t)qi * sv_band) >> 14);
+                sv_band += (int32_t)(((int64_t)fi * hp) >> 14);
+            }
+            if (sv_low > 1 << 23) sv_low = 1 << 23; else if (sv_low < -(1 << 23)) sv_low = -(1 << 23);
+            if (sv_band > 1 << 23) sv_band = 1 << 23; else if (sv_band < -(1 << 23)) sv_band = -(1 << 23);
+                                                 /* (1 << 23: -(1 << 22) is 0xFFC00000, which the build
+                                                  * refuses as a reference into the chip's ROM) */
+            y = (int32_t)(((int64_t)sv_low * sv_comp) >> 15);
+            if (y > 65535) y = 65535; else if (y < -65535) y = -65535;   /* keeps the gains below in int32 */
+            s += (int32_t)(((int64_t)(y - s) * (sv_w >> 8)) >> 15);
+        }
+        sv_f += sv_f_step; sv_q += sv_q_step; sv_w += sv_w_step;
         s = (s * (rg >> 8)) >> 8;               /* resonance compensation */
         rg += rg_step;
         s = (s * (ae >> 3)) >> 12;              /* Amp Decay; ae in Q12 here: s can reach ~150000 after
                                                   * the resonance gain, and that times Q15 overflows */
         ae += ae_step;
+        if (par.drive) s = drive_px(s);         /* off: untouched, as before */
         out[2u * i] += s;                       /* L */
         out[2u * i + 1u] += s;                  /* R */
     }
     voice[0].ph = ph;
     voice[0].inc = step;
     voice[0].amp = amp;
+effects:
+    delay_px(out, n);                           /* always: keeps the lines current, so turning the mix up
+                                                  * never plays stale echoes */
 #ifndef DINGHY_HOST
     dbg_us_now = (fm1_ticks() - t0) / FM1_TICKS_PER_US;
     if (dbg_us_now > dbg_us_max) dbg_us_max = dbg_us_now;
@@ -778,7 +856,7 @@ static void draw_steps(const struct seq_step_s *step, int32_t mark)   /* mark: -
 static const char *const PNAME[] = {"SIZE", "RES", "VOICE", "CUTOFF", "TONGUE", "JAW",   /* X: the tongue,
                                                                  * front..back; Y: the jaw, closed..open */
                                      "TONGUE RATE", "TONGUE DEPTH", "JAW RATE", "JAW DEPTH", "VOWEL", "BPM", "STEP",
-                                     "DECAY", "ENV MOD", "ACCENT", "AMP DECAY", "RANDOM", "SCALE", "ROOT", "STEP VOWEL", "SAVED", "LOADED", "NEXT", "EMPTY", "TRANSPOSE"};
+                                     "DECAY", "ENV MOD", "ACCENT", "AMP DECAY", "RANDOM", "SCALE", "ROOT", "STEP VOWEL", "SAVED", "LOADED", "NEXT", "EMPTY", "TRANSPOSE", "DRIVE", "DELAY", "FEEDBACK", "DELAY MIX"};
 static void draw_touched(uint32_t id, int32_t val)    /* last knob moved: name + value, replaces the
                                                         * name shown at power-on */
 {
@@ -793,6 +871,9 @@ static void draw_touched(uint32_t id, int32_t val)    /* last knob moved: name +
     } else if (id == 19) {
         note_name(v, (uint32_t)val);
         for (j = 0; v[j]; j++) s[i++] = v[j];
+    } else if (id == 27) {                      /* the delay time as a note value */
+        static const char *const DIV[5] = {"1/16", "1/8", "3/16", "1/4", "3/8"};
+        for (p = DIV[val]; *p; ) s[i++] = *p++;
     } else if (id == 25) {                      /* semitones, with their sign */
         if (val > 0) s[i++] = '+';
         fmt_int(v, val);
@@ -940,6 +1021,7 @@ static void app_main(void)
     led_dim(BTN_LFO, 1);                        /* soft glow, always -- fm1_led_key(BTN_LFO, ...) above
                                                   * goes full bright on top of it while held */
     led_dim(BTN_ENV, 1);                        /* same: always does something (the envelope knobs) */
+    led_dim(BTN_FX, 1);                         /* FX: the effects on knobs 1-4, like LFO and ENV */
     led_dim(BTN_SEQ, 1);                        /* and SEQ (+ SELECT: the tempo) .. */
     led_dim(BTN_ARP, 1);                        /* .. and ARP: the randomizer's shift (random pattern,
                                                   * root, scale) */
@@ -1074,24 +1156,33 @@ static void app_main(void)
             int32_t lfo = (int32_t)(fm1_in.buttons & (1u << BTN_LFO));
             int32_t env = (int32_t)(fm1_in.buttons & (1u << BTN_ENV));   /* BTN_ENV held: the envelope,
                                                                        * same idea as BTN_LFO */
+            int32_t fx = (int32_t)(fm1_in.buttons & (1u << BTN_FX));      /* BTN_FX held: the effects */
             int32_t seqShift = (int32_t)(fm1_in.buttons & (1u << BTN_SEQ));
             int32_t d;
             d = fm1_enc_take(ENC_KNOB1);
             if (env && d) tap_pending = 0;      /* ENV used as a shift: not a tap (record mode) */
             if (lfo) knob(&par.lfoXRate,  d, 20, 0, 1000, 6); else if (env) knob(&par.decay,  d, 20, 0, 1000, 13);
+            else if (fx) knob(&par.dlymix, d, 20, 0, 1000, 29);
             else knob(&par.size,   d, 20,  500, 2000, 0);
             d = fm1_enc_take(ENC_KNOB2);
             if (env && d) tap_pending = 0;
             if (lfo) knob(&par.lfoXDepth, d, 20, 0, 1000, 7); else if (env) knob(&par.envmod, d, 20, 0, 1000, 14);
+            else if (fx) knob(&par.dlyfb, d, 20, 0, 1000, 28);
             else knob(&par.resx10, d, 10,   10,  500, 1);
             d = fm1_enc_take(ENC_KNOB3);
             if (env && d) tap_pending = 0;
             if (lfo) knob(&par.lfoYRate,  d, 20, 0, 1000, 8); else if (env) knob(&par.accent, d, 20, 0, 1000, 15);
+            else if (fx) knob(&par.dlydiv, d > 0 ? 1 : d < 0 ? -1 : 0, 1, 0, 4, 27);   /* one division a click */
             else knob(&par.voice,  d, 20,    0, 1000, 2);
             d = fm1_enc_take(ENC_KNOB4);
             if (env && d) tap_pending = 0;
             if (lfo) knob(&par.lfoYDepth, d, 20, 0, 1000, 9); else if (env) knob(&par.ampdec, d, 20, 0, 1000, 16);
+            else if (fx) knob(&par.drive, d, 20, 0, 1000, 26);
             else knob(&par.cutoff, d, 20,    0, 1000, 3);
+            {                                    /* the delay time in frames, from the tempo */
+                uint32_t len = DLY_16THS[par.dlydiv] * 661500u / (uint32_t)set.bpm;   /* 16ths * 15 s/bpm * 44.1 k */
+                dly_len = len < DLY_N - 1u ? len : DLY_N - 1u;   /* slow tempos: as long as the line goes */
+            }
             knob(&par.x, fm1_enc_take(ENC_ALGORITHM), 20, 0, 1000, 4);
             d = fm1_enc_take(ENC_SELECT);        /* Y normally; steps while recording; tempo under SEQ;
                                                    * the randomizer's scale under ARP */
@@ -1229,6 +1320,7 @@ static void app_main(void)
 #ifndef DINGHY_HOST
         fm1_led_key(BTN_SEQ, (fm1_in.buttons & (1u << BTN_SEQ)) != 0);
         fm1_led_key(BTN_ARP, (fm1_in.buttons & (1u << BTN_ARP)) != 0);
+        fm1_led_key(BTN_FX, (fm1_in.buttons & (1u << BTN_FX)) != 0);
         fm1_led_key(BTN_LFO, (fm1_in.buttons & (1u << BTN_LFO)) != 0);   /* full bright while held; the
                                                                           * constant soft glow (set once,
                                                                           * below) shows through otherwise */

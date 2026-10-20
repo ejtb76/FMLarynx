@@ -37,7 +37,11 @@ One voice, three formants:
 - **Size:** scales all formants up or down (0.5x to 2x), from a giant's throat to a tiny one.
 - **Resonance:** how narrow and ringing the formants are. Output is compensated so the volume stays roughly level as
   you turn it up.
-- **Cutoff:** a low-pass filter after the formants (12 dB/octave), from 60 Hz to fully open.
+- **Cutoff:** a resonant low-pass filter after the formants (12 dB/octave), from 60 Hz to fully open. Its
+  resonance follows the **Resonance** knob (Q 0.7 to 8), one resonance for formants and filter as on a 303, and
+  accents sharpen it too.
+- **Effects:** **Drive**, a soft-clipping distortion after the voice, and a tempo-synced ping-pong **Delay**: the
+  echoes alternate left and right, each a little darker, and ring out after the notes stop.
 - **Envelope (TB-303 style):** every new note restarts it. **Env Mod** sets how far it opens the cutoff (up to 4
   octaves) and the formant size (up to 2x); **Decay** how fast it closes again. **Amp Decay** lets the volume die
   away too.
@@ -57,23 +61,24 @@ its value, and the octave.
 
 ## Controls
 
-No menus: every parameter has its own encoder. The **LFO** and **ENV** buttons turn knobs 1 to 4 into the LFO or
-the envelope controls for as long as you hold them.
+No menus: every parameter has its own encoder. The **LFO**, **ENV** and **FX** buttons turn knobs 1 to 4 into the
+LFO, envelope or effect controls for as long as you hold them.
 
 ### Encoders
 
-| Control | Normally | While holding **LFO** | While holding **ENV** |
-| --- | --- | --- | --- |
-| **KNOB 1** | Size, 500 to 2000 (0.5x to 2x) | Tongue LFO rate, 0 to 1000 (0 to 8 Hz) | Decay, 0 to 1000 (30 ms to 2 s) |
-| **KNOB 2** | Resonance, 10 to 500 (Q 1 to 50) | Tongue LFO depth, 0 to 1000 | Env Mod, 0 to 1000 |
-| **KNOB 3** | Voice, 0 to 1000 (male to female/child) | Jaw LFO rate, 0 to 1000 (0 to 8 Hz) | Accent amount, 0 to 1000 |
-| **KNOB 4** | Cutoff, 0 to 1000 (60 Hz to open) | Jaw LFO depth, 0 to 1000 | Amp Decay, 0 to 1000 (30 ms to 2 s; 1000 holds) |
-| **ALGORITHM** | Tongue, 0 to 1000 (front to back) | | |
-| **SELECT** | Jaw, 0 to 1000 (closed to open; see the sequencer for its other jobs) | | |
-| **PRESETS** | Jump to a vowel: i, e, a, o, u (in record mode: the cursor step's vowel) | | |
-| **MASTER** | Volume | | |
+| Control | Normally | While holding **LFO** | While holding **ENV** | While holding **FX** |
+| --- | --- | --- | --- | --- |
+| **KNOB 1** | Size, 500 to 2000 (0.5x to 2x) | Tongue LFO rate, 0 to 1000 (0 to 8 Hz) | Decay, 0 to 1000 (30 ms to 2 s) | Delay mix, 0 to 1000 (0 = off) |
+| **KNOB 2** | Resonance, 10 to 500 (Q 1 to 50) | Tongue LFO depth, 0 to 1000 | Env Mod, 0 to 1000 | Delay feedback, 0 to 1000 |
+| **KNOB 3** | Voice, 0 to 1000 (male to female/child) | Jaw LFO rate, 0 to 1000 (0 to 8 Hz) | Accent amount, 0 to 1000 | Delay time: 1/16, 1/8, 3/16, 1/4, 3/8 |
+| **KNOB 4** | Cutoff, 0 to 1000 (60 Hz to open) | Jaw LFO depth, 0 to 1000 | Amp Decay, 0 to 1000 (30 ms to 2 s; 1000 holds) | Drive, 0 to 1000 |
+| **ALGORITHM** | Tongue, 0 to 1000 (front to back) | | | |
+| **SELECT** | Jaw, 0 to 1000 (closed to open; see the sequencer for its other jobs) | | | |
+| **PRESETS** | Jump to a vowel: i, e, a, o, u (in record mode: the cursor step's vowel) | | | |
+| **MASTER** | Volume | | | |
 
-At power-on: Cutoff open, Env Mod 0, Decay 500, Accent 1000, Amp Decay 1000, so the envelope is out of the way
+At power-on: Cutoff open, Env Mod 0, Decay 500, Accent 1000, Amp Decay 1000, Drive 0, Delay mix 0 (3/16, feedback
+400), so the envelope and the effects are out of the way
 until you dial it in.
 
 The tongue LFO moves the tongue, the jaw LFO the jaw, each around where the encoders put it. The screen shows the name and
@@ -94,6 +99,7 @@ value of the last control you turned.
 | **SAVE** | Hold and press a white key: store the pattern there (16 places). |
 | **SEQ** | Hold and turn **SELECT** to set the tempo; hold and press a key or **OCT** to transpose the pattern. |
 | **ARP** | The pattern randomizer: hold it and press **PLAY**, a key or turn **SELECT** (see below). |
+| **FX** | Hold to set the effects with knobs 1 to 4; glows softly, lights up while held. |
 
 ## Sequencer
 
