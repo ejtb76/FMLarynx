@@ -233,6 +233,7 @@ GPL-3.0-only: you may change and share it, and whoever gets a firmware built fro
 and third-party parts in [LICENSING.md](LICENSING.md).
 
 - **FMLarynx** (the formant synth, sequencer, screen and effects in `dinghy.c`): Presethead
+- The formant filter design follows **[MouthTowel](https://github.com/nickb808-dev/er301-MouthTowel)** by nickb808-dev
 - **[Dinghy](https://github.com/zvenson/dinghy)** (the app skeleton, the wiring `platform.c`, host mode, docs): zvenson
 - **The platform:** Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
   ([Felucca](https://github.com/hugelton/Felucca)), with the changes of [SLOOP](https://github.com/isod89/sloop-fm1)
