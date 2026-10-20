@@ -84,14 +84,15 @@ value of the last control you turned.
 | Control | What it does |
 | --- | --- |
 | **Keys** | Play the voice (27 keys, F3 to G5 at octave 0). Monophonic: the last note played wins. |
-| **OCT- / OCT+** | Octave, -2 to +2. The button lights when you're off centre. |
+| **OCT- / OCT+** | Octave, -2 to +2. The button lights when you're off centre. (With **SEQ** held: transpose the pattern.) |
 | **LFO** | Hold to set the LFOs with knobs 1 to 4. Glows softly as a reminder, lights up while held. |
 | **ENV** | Hold to set the envelope with knobs 1 to 4; glows softly, lights up while held. In record mode it also marks accents. |
 | **REC** | Sequencer record mode on/off. |
 | **PLAY** | Start/stop the sequencer. |
 | **GLO** | In record mode: marks slides (it only glows there). |
-| **SEL** | In record mode: enters a rest (clears the cursor step and moves on; it only glows there). |
-| **SEQ** | Hold and turn **SELECT** to set the tempo. |
+| **SEL** | Hold and press a white key: load a stored pattern. Tapped in record mode: enters a rest. |
+| **SAVE** | Hold and press a white key: store the pattern there (16 places). |
+| **SEQ** | Hold and turn **SELECT** to set the tempo; hold and press a key or **OCT** to transpose the pattern. |
 | **ARP** | The pattern randomizer: hold it and press **PLAY**, a key or turn **SELECT** (see below). |
 
 ## Sequencer
@@ -107,9 +108,9 @@ Each step is a 16th note.
    while pressing the key to make that step a slide and/or an accent.
 4. Press **REC** again to leave record mode.
 
-You hear every note as you enter it. A step without a note is a rest: press **SEL** to enter one (it clears the
+You hear every note as you enter it. A step without a note is a rest: tap **SEL** to enter one (it clears the
 cursor step and moves on, like a key does), so notes and rests go in one after the other. To change a step, move
-the cursor to it and record over it, or press **SEL** to clear it. To add or remove a slide or accent afterwards,
+the cursor to it and record over it, or tap **SEL** to clear it. To add or remove a slide or accent afterwards,
 move the cursor to the step and tap **GLO** or **ENV** on its own: it toggles on release, and only if you didn't
 press a key or turn SELECT while holding it.
 
@@ -155,8 +156,18 @@ kept with the pattern.
 **MIDI clock:** when a DAW or another device sends MIDI clock over USB, the sequencer follows it, and MIDI
 start, stop and continue start and stop it. If the clock stops for half a second, it carries on at its own tempo.
 
-**Saved:** the pattern, the tempo, the octave, and the randomizer's root and scale are kept in flash and come back
-after power-off. They are saved two seconds after your last change, once the sequencer is stopped and nothing is
+**Transpose:** hold **SEQ** and press a key: the pattern moves so that its first note lands on that key (press that
+first note itself to go back). **SEQ** + **OCT-** / **OCT+** moves it an octave. It is live: the stored notes stay as
+they are, the change is heard from the next step, and it goes back to 0 when you load a pattern or pick a new root
+with **ARP** + a key (not with **ARP** + **PLAY**, so you can jam on in the same key). Not kept after power-off.
+
+**Stored patterns:** hold **SAVE** and press a white key to store the pattern (notes, slides, accents, vowels, root
+and scale) in one of 16 places; hold **SEL** and press a white key to load one. While the sequencer plays, a load
+waits for the next step 1, so the switch lands on the beat. While **SAVE** or **SEL** is held, the white keys show
+the places: middle = stored, full = the one last saved or loaded. The tempo is the same for all of them.
+
+**Saved:** the pattern, the 16 stored patterns, the tempo, the octave, and the randomizer's root and scale are kept
+in flash and come back after power-off. They are saved two seconds after your last change, once the sequencer is stopped and nothing is
 sounding, because writing to flash briefly interrupts the sound. Stop the sequencer for a moment before you switch
 off, so your last changes are saved.
 

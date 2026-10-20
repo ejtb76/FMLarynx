@@ -160,7 +160,7 @@ static int settings_load(void *p, uint32_t n);         /* 0 = loaded; else *p is
 static int settings_save(const void *p, uint32_t n);   /* 0 = saved */
 ```
 
-Up to 256 bytes, kept with their length and a CRC32 in one 4 KiB flash sector (`SETTINGS_AT`, 0xFC000). A
+Up to 1024 bytes (`SETTINGS_MAX`; 256 in Dinghy), kept with their length and a CRC32 in one 4 KiB flash sector (`SETTINGS_AT`, 0xFC000). A
 change of size or a broken save reads as "nothing saved": start from your defaults then.
 
 **Save when nothing sounds.** Erasing the sector holds the interrupts off for tens of milliseconds: the sound

@@ -590,6 +590,8 @@ struct seq_step_s { uint8_t note, flags; };     /* flags: bit0 active, bit1 slid
                                                   * same byte, so `set` keeps its size and old patterns load
                                                   * as they were (no accents, no vowels) */
 #define STEP_VOW(f) ((uint32_t)(f) >> 3 & 7u)
+#define NSLOT 16u                               /* stored patterns, one per white key */
+struct slot_s { struct seq_step_s step[NSTEP]; uint8_t root, scale; };   /* a stored pattern */
 
 /* As on a 303: a note sounds for half its step, then lets go (seq_release()); a slide step holds its
  * note into the next step instead, which then glides there in pitch without restarting the envelope.
@@ -615,25 +617,30 @@ static void seq_halt(void)                      /* the sequencer stops: let go o
 
 static uint32_t uv_kick_ms = 0u - 1000u;       /* the last accent, for the uvula's wobble */
 
+static int32_t seq_transpose;                   /* semitones added as the pattern plays (SEQ + a key or
+                                                  * OCT); live, not stored, 0 again when a pattern loads */
+
 static void seq_trigger(const struct seq_step_s *s)   /* shared by the internal clock and MIDI clock */
 {
     uint32_t prev = seq_note;
+    int32_t tn = (int32_t)s->note + seq_transpose;    /* the note as it sounds */
+    uint32_t note = (uint32_t)(tn < 0 ? 0 : tn > 127 ? 127 : tn);
     if (s->flags & 1u) {
         uint32_t vel = s->flags & 4u ? 100u + 27u * (uint32_t)par.accent / 1000u : 100u;   /* accent: louder */
         int32_t slide = seq_tie && prev < 128u;        /* the step before tied into this one */
         if (!slide) voice[0].amp = 0;                  /* not a slide: hard retrigger */
         if (s->flags & 4u) { accent_env = 32767; uv_kick_ms = fm1_ms; }   /* the uvula wobbles too */
         glide_next = slide;
-        play(s->note, vel);
+        play(note, vel);
         glide_next = 0;
-        if (prev != s->note) {
-            midi_send(0x90, s->note, vel);
+        if (prev != note) {
+            midi_send(0x90, note, vel);
             if (prev < 128u) midi_send(0x80, prev, 0);  /* after the new note-on: legato */
         } else if (!slide) {
             midi_send(0x80, prev, 0);                    /* same note again, retriggered */
-            midi_send(0x90, s->note, vel);
+            midi_send(0x90, note, vel);
         }                                                /* same note tied: it just goes on */
-        seq_note = s->note;
+        seq_note = note;
         vow_lock = (int32_t)STEP_VOW(s->flags);        /* the step's vowel, or back to the knobs */
         seq_tie = (s->flags & 2u) != 0;
     } else {
@@ -643,9 +650,10 @@ static void seq_trigger(const struct seq_step_s *s)   /* shared by the internal 
 
 /* ARP + PLAY: a random pattern, acid style -- notes from the chosen scale over the chosen root, two
  * octaves up, the root and its octave the most likely; step 1 always the root, so the groove has an
- * anchor; about a quarter rests, a fifth slides, a quarter accents, and ~30% of the notes a vowel. ARP + a key picks the root (and
- * makes a pattern on it), ARP + SELECT the scale. (ARP, not SEQ: SEQ sits right next to PLAY.) Plain xorshift, seeded by the free-running tick
- * counter at the first press, so every power-on gives other patterns. */
+ * anchor; about a quarter rests, a fifth slides, a quarter accents, and ~30% of the notes a vowel.
+ * ARP + a key picks the root (and makes a pattern on it), ARP + SELECT the scale. (ARP, not SEQ:
+ * SEQ sits right next to PLAY.) Plain xorshift, seeded by the free-running tick counter at the
+ * first press, so every power-on gives other patterns. */
 #define NSCALE 6u
 static const uint16_t SCALE_MASK[NSCALE] = {    /* bit n: n semitones over the root is in the scale */
     0x0000u | 1u << 0 | 1u << 3 | 1u << 5 | 1u << 7 | 1u << 10,                       /* minor pentatonic */
@@ -686,6 +694,34 @@ static void seq_randomize(struct seq_step_s *step, uint32_t root, uint32_t scale
             step[k].note = 0;
         step[k].flags = (uint8_t)f;
     }
+}
+
+static int32_t white_index(uint32_t k)          /* the n-th white key (0..15) a key is, -1 for a black one */
+{
+    uint32_t j, n = 0;
+    if (black(KEY0 + k)) return -1;
+    for (j = 0; j < k; j++)
+        if (!black(KEY0 + j)) n++;
+    return (int32_t)n;
+}
+
+static uint32_t pattern_ref(const struct seq_step_s *step, uint32_t root)   /* what SEQ + a key moves: the
+                                                  * first note of the pattern -- recorded or random (whose
+                                                  * step 1 is the root) alike -- or the root if it's empty */
+{
+    uint32_t k;
+    for (k = 0; k < NSTEP; k++)
+        if (step[k].flags & 1u) return step[k].note;
+    return root;
+}
+
+static void slot_apply(struct seq_step_s *step, uint8_t *root, uint8_t *scale, const struct slot_s *src)
+{                                               /* a stored pattern becomes the one that plays */
+    uint32_t k;
+    for (k = 0; k < NSTEP; k++) step[k] = src->step[k];
+    *root = src->root;
+    *scale = src->scale;
+    seq_transpose = 0;                          /* it may well be in another key: as stored */
 }
 
 static uint32_t white_key_id(uint32_t n)        /* physical key index of the n-th white key (0..15) --
@@ -742,7 +778,7 @@ static void draw_steps(const struct seq_step_s *step, int32_t mark)   /* mark: -
 static const char *const PNAME[] = {"SIZE", "RES", "VOICE", "CUTOFF", "TONGUE", "JAW",   /* X: the tongue,
                                                                  * front..back; Y: the jaw, closed..open */
                                      "TONGUE RATE", "TONGUE DEPTH", "JAW RATE", "JAW DEPTH", "VOWEL", "BPM", "STEP",
-                                     "DECAY", "ENV MOD", "ACCENT", "AMP DECAY", "RANDOM", "SCALE", "ROOT", "STEP VOWEL"};
+                                     "DECAY", "ENV MOD", "ACCENT", "AMP DECAY", "RANDOM", "SCALE", "ROOT", "STEP VOWEL", "SAVED", "LOADED", "NEXT", "EMPTY", "TRANSPOSE"};
 static void draw_touched(uint32_t id, int32_t val)    /* last knob moved: name + value, replaces the
                                                         * name shown at power-on */
 {
@@ -756,6 +792,10 @@ static void draw_touched(uint32_t id, int32_t val)    /* last knob moved: name +
         for (p = SCALE_NAME[val]; *p; ) s[i++] = *p++;
     } else if (id == 19) {
         note_name(v, (uint32_t)val);
+        for (j = 0; v[j]; j++) s[i++] = v[j];
+    } else if (id == 25) {                      /* semitones, with their sign */
+        if (val > 0) s[i++] = '+';
+        fmt_int(v, val);
         for (j = 0; v[j]; j++) s[i++] = v[j];
     } else if (id == 10 || id == 20) {          /* a vowel by letter; a step's: 0 = none, shown as - */
         s[i++] = id == 20 && !val ? '-' : "ieaou"[id == 20 ? val - 1 : val];
@@ -853,10 +893,15 @@ static void app_main(void)
         int16_t bpm;
         struct seq_step_s step[NSTEP];
         uint8_t root, scale;                    /* the randomizer's: a MIDI note, an index into SCALE_MASK */
+        uint8_t slot;                           /* the stored pattern last saved or loaded */
+        uint16_t used;                          /* bit n: slot n holds a pattern */
+        struct slot_s bank[NSLOT];              /* ~550 bytes: why SETTINGS_MAX is 1024 */
     } set = {0};
     uint32_t prev = 0, k, t_change = 0, dirty = 0, lit_drawn = ~0u, note_drawn = ~0u;
     uint32_t tap_pending = 0;                   /* GLO/ENV pressed, not yet used as a modifier */
     uint32_t randoms = 0;                       /* ARP + PLAY presses, shown as RANDOM n */
+    uint32_t sel_pending = 0;                   /* SEL pressed, not yet used to load: a rest on release */
+    int32_t load_next = -1;                     /* a stored pattern queued for the next step 1 */
     int32_t thr_x = -100, thr_y = -100;         /* the throat as last drawn .. */
     uint32_t thr_ms = 0, thr_row = THROAT_H;    /* .. when, and the next row of a frame being drawn */
     int32_t thr_sway = 0;                       /* .. and the uvula's sway in it */
@@ -887,6 +932,7 @@ static void app_main(void)
     if (set.bpm < 40 || set.bpm > 300) set.bpm = 120;
     if (set.root < 24 || set.root > 108) set.root = 48;      /* C3 */
     if (set.scale >= NSCALE) set.scale = 0;
+    if (set.slot >= NSLOT) set.slot = 0;
 
     lcd_fill(0, 0, 240, 240, C_BG);
     text_box(0, 199, 240, &FONT_S, APP_NAME "  v" APP_VER, C_TEXT);   /* until a knob is touched */
@@ -915,13 +961,49 @@ static void app_main(void)
         prev = keys;
         for (k = 0; k < 27u; k++) {                 /* (a key stops the note it started: the octave may change meanwhile) */
             if (down >> k & 1u) {
+                int32_t n = white_index(k);
                 held[k] = (uint8_t)(base + k);
+                if (fm1_in.buttons & (1u << BTN_SAVE | 1u << BTN_SEL)) {   /* SAVE / SEL + a white key: store /
+                                                      * load a pattern; silent, nothing recorded */
+                    held[k] = 255;                  /* nothing to stop on release */
+                    sel_pending = 0;                /* SEL used as a modifier: no rest */
+                    if (n >= 0 && (fm1_in.buttons & (1u << BTN_SAVE))) {
+                        uint32_t j;
+                        for (j = 0; j < NSTEP; j++) set.bank[n].step[j] = set.step[j];
+                        set.bank[n].root = set.root;
+                        set.bank[n].scale = set.scale;
+                        set.used |= (uint16_t)(1u << n);
+                        set.slot = (uint8_t)n;
+                        dirty = 1; t_change = fm1_ms;
+                        touched_id = 21; touched_val = n + 1;
+                    } else if (n >= 0 && !(set.used >> n & 1u)) {
+                        touched_id = 24; touched_val = n + 1;     /* nothing stored there */
+                    } else if (n >= 0 && seq_running) {
+                        load_next = n;              /* playing: switch at the next step 1, on the beat */
+                        touched_id = 23; touched_val = n + 1;
+                    } else if (n >= 0) {
+                        slot_apply(set.step, &set.root, &set.scale, &set.bank[n]);
+                        set.slot = (uint8_t)n;
+                        dirty = 1; t_change = fm1_ms;
+                        touched_id = 22; touched_val = n + 1;
+                    }
+                    continue;
+                }
+                if (fm1_in.buttons & (1u << BTN_SEQ)) {   /* SEQ + a key: transpose, live -- the pattern's
+                                                      * first note to that key (that note itself: back to
+                                                      * 0); silent, heard from the next step */
+                    seq_transpose = (int32_t)held[k] - (int32_t)pattern_ref(set.step, set.root);
+                    held[k] = 255;
+                    touched_id = 25; touched_val = seq_transpose;
+                    continue;
+                }
                 play(held[k], 100);                 /* always sounds live, recording or not -- you hear
                                                       * what you're entering */
                 midi_send(0x90, held[k], 100);
                 if (fm1_in.buttons & (1u << BTN_ARP)) {  /* ARP + a key: the randomizer's root, and a
                                                       * pattern on it right away (not recorded) */
                     set.root = held[k];
+                    seq_transpose = 0;              /* a new key, chosen: as it comes */
                     seq_randomize(set.step, set.root, set.scale);
                     dirty = 1; t_change = fm1_ms;
                     touched_id = 19; touched_val = set.root;
@@ -936,12 +1018,17 @@ static void app_main(void)
                     touched_id = 12; touched_val = rec_step;
                 }
             }
-            if (up >> k & 1u) { stop(held[k]); midi_send(0x80, held[k], 0); }
+            if (up >> k & 1u && held[k] < 128u) { stop(held[k]); midi_send(0x80, held[k], 0); }
         }
 
         b = fm1_input_edges(&rel);              /* buttons pressed since the last call (bit = button id) */
-        if (b & (1u << BTN_OCT_DOWN) && set.oct > -2) { set.oct--; dirty = 1; t_change = fm1_ms; }
-        if (b & (1u << BTN_OCT_UP) && set.oct < 2) { set.oct++; dirty = 1; t_change = fm1_ms; }
+        if (fm1_in.buttons & (1u << BTN_SEQ)) {  /* SEQ + OCT: the pattern an octave down/up, live */
+            if (b & (1u << BTN_OCT_DOWN) && seq_transpose > -36) { seq_transpose -= 12; touched_id = 25; touched_val = seq_transpose; }
+            if (b & (1u << BTN_OCT_UP) && seq_transpose < 36) { seq_transpose += 12; touched_id = 25; touched_val = seq_transpose; }
+        } else {
+            if (b & (1u << BTN_OCT_DOWN) && set.oct > -2) { set.oct--; dirty = 1; t_change = fm1_ms; }
+            if (b & (1u << BTN_OCT_UP) && set.oct < 2) { set.oct++; dirty = 1; t_change = fm1_ms; }
+        }
         /* GLO/ENV tapped on their own in record mode toggle slide/accent on the cursor step (note and
          * cursor unchanged). On release, not press: held while a key records or while SELECT moves the
          * cursor, they are a modifier instead, and recording/moving cancels the toggle (tap_pending) */
@@ -952,9 +1039,11 @@ static void app_main(void)
             dirty = 1; t_change = fm1_ms;
         }
         tap_pending &= ~rel;
-        if (rec_mode && (b & (1u << BTN_SEL))) {   /* SEL in record mode: a rest -- clears the cursor
+        sel_pending |= b & (1u << BTN_SEL);
+        if (rec_mode && (rel & sel_pending)) {   /* SEL tapped in record mode: a rest -- clears the cursor
                                                    * step (note, slide, accent) and moves on, the same
-                                                   * way a key records a note and moves on */
+                                                   * way a key records a note and moves on. On release:
+                                                   * held through a key it loads a pattern instead */
             set.step[rec_step].note = 0;
             set.step[rec_step].flags = 0;
             rec_step = (int32_t)((rec_step + 1) % (int32_t)NSTEP);
@@ -962,6 +1051,7 @@ static void app_main(void)
             dirty = 1; t_change = fm1_ms;
             touched_id = 12; touched_val = rec_step;
         }
+        sel_pending &= ~rel;
         if (b & (1u << BTN_REC)) {              /* toggle record mode: stop playback, reset the cursor */
             rec_mode = !rec_mode;
             if (rec_mode) { seq_running = 0; rec_step = 0; stop((uint32_t)voice[0].note); seq_halt(); }
@@ -1051,6 +1141,11 @@ static void app_main(void)
                                                                        * external clock later drops out */
                 if (seq_running && !rec_mode && ++midiclk_count >= 6u) {
                     midiclk_count = 0;
+                    if (seq_step == 0 && load_next >= 0) {   /* a queued pattern comes in on step 1 */
+                        slot_apply(set.step, &set.root, &set.scale, &set.bank[load_next]);
+                        set.slot = (uint8_t)load_next; dirty = 1; t_change = fm1_ms;
+                        touched_id = 22; touched_val = load_next + 1; load_next = -1;
+                    }
                     seq_trigger(&set.step[seq_step]);
                     seq_step = (seq_step + 1) % (int32_t)NSTEP;
                 } else if (seq_running && !rec_mode && midiclk_count == 3u) {
@@ -1067,6 +1162,11 @@ static void app_main(void)
         if (seq_running && !rec_mode && fm1_ms - midiclk_last_ms > 500u && fm1_ms >= seq_next_ms) {
             seq_next_ms += (uint32_t)(15000 / set.bpm);   /* 60000 / bpm / 4; no drift: += not = */
             seq_off_ms = fm1_ms + (uint32_t)(7500 / set.bpm);   /* half a step */
+            if (seq_step == 0 && load_next >= 0) {           /* a queued pattern comes in on step 1 */
+                slot_apply(set.step, &set.root, &set.scale, &set.bank[load_next]);
+                set.slot = (uint8_t)load_next; dirty = 1; t_change = fm1_ms;
+                touched_id = 22; touched_val = load_next + 1; load_next = -1;
+            }
             seq_trigger(&set.step[seq_step]);
             seq_step = (seq_step + 1) % (int32_t)NSTEP;
         }
@@ -1088,6 +1188,15 @@ static void app_main(void)
                                                    * as "sounding", same "brightest wins" compositing */
             for (k = 0; k < NSTEP; k++)
                 led_bg(KEY_LED(white_key_id(k)), (set.step[k].flags & 1u) != 0);
+        if (fm1_in.buttons & (1u << BTN_SAVE | 1u << BTN_SEL))   /* the bank: stored = middle, the one
+                                                   * last saved/loaded (or queued) = full */
+            for (k = 0; k < NSLOT; k++) {
+                led_bg(KEY_LED(white_key_id(k)), set.used >> k & 1u);
+                fm1_led_key(KEY_LED(white_key_id(k)), k == set.slot || (int32_t)k == load_next);
+            }
+        else if (!rec_mode)                      /* outside record mode the middle tier is the bank's only */
+            for (k = 0; k < NSLOT; k++)
+                led_bg(KEY_LED(white_key_id(k)), 0);
 #endif
         fm1_led_key(BTN_OCT_DOWN, set.oct < 0);
         fm1_led_key(BTN_OCT_UP, set.oct > 0);
@@ -1109,8 +1218,10 @@ static void app_main(void)
             uint32_t f = rec_mode ? set.step[rec_step].flags
                        : seq_running ? set.step[(seq_step + (int32_t)NSTEP - 1) % (int32_t)NSTEP].flags : 0u;
             led_dim(BTN_GLO, rec_mode != 0);
-            led_dim(BTN_SEL, rec_mode != 0);     /* SEL = rest, likewise only in record mode */
-            fm1_led_key(BTN_SEL, rec_mode && (fm1_in.buttons & (1u << BTN_SEL)));
+            led_dim(BTN_SEL, 1);                 /* SEL: load (+ a key), and a rest in record mode */
+            fm1_led_key(BTN_SEL, (fm1_in.buttons & (1u << BTN_SEL)) != 0);
+            led_dim(BTN_SAVE, 1);                /* SAVE: store (+ a key) */
+            fm1_led_key(BTN_SAVE, (fm1_in.buttons & (1u << BTN_SAVE)) != 0);
             fm1_led_key(BTN_GLO, (rec_mode && (fm1_in.buttons & (1u << BTN_GLO))) || (f & 2u));
             fm1_led_key(BTN_ENV, (fm1_in.buttons & (1u << BTN_ENV)) || (f & 4u));
         }
