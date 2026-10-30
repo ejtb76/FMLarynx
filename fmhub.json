@@ -1,0 +1,8 @@
+{
+  "what": "A throaty talking formant synth with a 303-style pattern sequencer: a saw wave through a three-formant vowel filter with an envelope, a resonant low-pass, drive and ping-pong delay. 16 steps with vowels, accent and slide per step, a pattern randomizer and 16 stored patterns.",
+  "author": "Presethead",
+  "kinds": [
+    "synth"
+  ],
+  "image": "docs/screen.png"
+}
