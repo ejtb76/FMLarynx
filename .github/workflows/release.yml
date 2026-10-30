@@ -1,0 +1,17 @@
+# A version tag (git tag v0.2 && git push fork v0.2) has GitHub build, sign and release FMLarynx with the Firmware
+# Hub's shared workflow: the hub then shows "Built from source on GitHub" on its card. Never replace the .fwsc by hand
+# afterwards, or the signature no longer matches.
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    uses: zvenson/fm1-build/.github/workflows/build.yml@v1
+    permissions:
+      contents: write        # the release
+      id-token: write        # the signing certificate
+      attestations: write    # the attestation
+    with:
+      build: ./build.sh --release "${GITHUB_REF_NAME#v}"
+      packages: build/*.fwsc
