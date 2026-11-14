@@ -1,0 +1,55 @@
+# A held button shows what it does: its panel in the keyboard's place after 250 ms, the values as the knobs turn; a
+# tap shows nothing; let go, the keyboard again. EDIT glows as an option.
+#   sh build.sh --host && app/build/host/fmlarynx_host app/tests/hold.txt build/hold
+wait 1200
+shot 00-throat.png
+press LFO
+wait 400
+expect hold 3
+turn K1 3
+wait 200
+shot 01-lfo.png
+release LFO
+wait 300
+expect hold -1
+press ENV
+wait 400
+shot 02-env.png
+release ENV
+press FX
+wait 400
+shot 03-fx.png
+release FX
+press SEQ
+wait 400
+shot 04-seq.png
+release SEQ
+press ARP
+wait 400
+shot 05-arp.png
+release ARP
+press SEL
+wait 400
+shot 06-sel.png
+release SEL
+press SAVE
+wait 400
+shot 07-save.png
+release SAVE
+# a tap: no panel
+tap LFO
+expect hold -1
+# recording: ENV says what its tap does, GLO has a panel too
+tap REC
+press GLO
+wait 400
+expect hold 5
+shot 08-glo-rec.png
+release GLO
+press ENV
+wait 400
+shot 09-env-rec.png
+release ENV
+tap REC
+wait 600
+shot 10-keys-again.png

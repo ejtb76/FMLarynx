@@ -13,4 +13,6 @@ export AC79_SDK="${AC79_SDK:-$HOME/fw-AC79_AIoT_SDK}"
 export X0X_FONTSET=terminus                    # Terminus, as FMLarynx had on Dinghy (fm1-base's tools/gen_font.py)
 PY="${PYTHON:-python3}"
 [ -f base/tools/build.py ] || { echo "build.sh: no fm1-base in base/ (git submodule update --init --recursive)"; exit 1; }
+mkdir -p build
+"$PY" -I tools/make_splash.py assets/splash.png build/splash.inc   # the splash (tools/splash_art.py draws it)
 exec "$PY" base/tools/build.py app "$@"

@@ -8,8 +8,16 @@
 
 #define APP_NAME "FMLARYNX"
 #define APP_SPLASH_RGB RGB(232, 64, 88)
+#if __has_include("../build/splash.inc")
+#define APP_SPLASH                       /* the picture (assets/splash.png) and the version: app_splash, app.c */
+void app_splash(void);
+#ifdef PLAT_HOST
+#define APP_HOST_CMD                     /* the host's "splash" (its boot skips it): for a screenshot */
+int app_host_cmd(const char *cmd, const char *a, const char *b, const char *c, const char *d);
+#endif
+#endif
 #define APP_BLOCK 256u                   /* frames per audio block: 5.8 ms at 44.1 kHz */
-#define APP_CANVAS_PX (240u * 114u)      /* the biggest strip drawn at once: the connections page, 240 x 114 */
+#define APP_CANVAS_PX (240u * 114u)      /* the biggest strip drawn at once: the throat, 240 x 114 */
 #define APP_TICK                         /* app_tick: the internal MIDI clock, out to USB and Bluetooth, 1 kHz */
 #define APP_BTDEV                        /* Bluetooth MIDI devices (lib/btdev.h): the connections page (EDIT) */
 #define APP_USB_HOST_NAME                /* the USB device hosted, by its own name: HOST TO AMENITY */

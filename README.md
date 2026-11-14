@@ -71,6 +71,11 @@ its value, and the octave.
 No menus: every parameter has its own encoder. The **LFO**, **ENV** and **FX** buttons turn knobs 1 to 4 into the
 LFO, envelope or effect controls for as long as you hold them.
 
+**Not sure what a button does?** Hold it: after a moment the keyboard on the screen makes way for a panel that lists
+what each knob, key or button does with it, with the values as they are now (they follow as you turn). This works for
+**LFO**, **ENV**, **FX**, **SEQ**, **ARP**, **SEL** and **SAVE** (and **GLO** in record mode). Let go and the keyboard
+is back. A quick tap shows nothing. The buttons that do something glow softly, **EDIT** included.
+
 ### Encoders
 
 | Control | Normally | While holding **LFO** | While holding **ENV** | While holding **FX** |

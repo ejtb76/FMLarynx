@@ -1043,6 +1043,9 @@ static struct {
     char say[32];                               /* app_say's message on the bottom text line, until say_until */
     uint32_t say_until;
     uint8_t say_new, say_shown, bottom_drawn;
+    uint8_t hold_b, hold_cand;                  /* the held button whose panel shows (NB: none); the one held now */
+    uint32_t hold_ms;                           /* .. since when */
+    char hold_drawn[160];                       /* what the panel last showed */
 } ui;
 
 void app_init(void)
@@ -1070,6 +1073,7 @@ void app_ui_init(void)                          /* the whole screen again: after
     ui.isr_now_drawn = ui.isr_max_drawn = ~0u;
     ui.bottom_drawn = 0;
     ui.say_shown = 0;
+    ui.hold_b = ui.hold_cand = NB;              /* no held button's panel */
 }
 
 void app_panic(void)                            /* silence now: an update is about to rewrite the flash */
@@ -1344,13 +1348,13 @@ static const char *upper(const char *s)         /* in capitals, as the screen wr
  * while it is up; the one connected), then the USB port's role (DEVICE, to a computer, or HOST to a MIDI device such
  * as another FM-1), as a list: SELECT moves the cursor, SAVE does what the row's action says, EDIT goes back. The
  * notes and the clock go to all of them; a Start from any of them is followed. As Amenity's. */
-static int link_devrows(void) { return btdev_busy() ? 1 : btdev_count() ? btdev_count() : 1; }
+static int link_devrows(void) { return btdev_busy() || plat_ble_linked() ? 1 : btdev_count() ? btdev_count() : 1; }
 static int link_usb_row(void) { return link_devrows(); }
 static const char *link_action(void)
 {
     if (ui.link_row >= link_usb_row())
         return plat_usb_host_state() == USBH_OFF ? "HOST" : "DEVICE";
-    return btdev_busy() ? "LET GO" : btdev_count() ? "CONNECT" : "";
+    return btdev_busy() ? "LET GO" : plat_ble_linked() ? "" : btdev_count() ? "CONNECT" : "";
 }
 static void link_enter(void)
 {
@@ -1358,7 +1362,7 @@ static void link_enter(void)
         plat_usb_host(plat_usb_host_state() == USBH_OFF);
         return;
     }
-    if (btdev_busy() || btdev_count()) {
+    if (btdev_busy() || (btdev_count() && !plat_ble_linked())) {
         int ev;
         if (!btdev_busy())
             btdev_choose(ui.link_row);
@@ -1376,20 +1380,39 @@ static void link_row(int32_t y, int row, const char *label, const char *text, ui
         cv_text_over(34, y, &FONT_S, ">", C_LIT);
     cv_text_over(44, y, &FONT_S, text, on ? C_LIT : c);
 }
+/* The lower area: the keyboard and the text line under it (OCTAVE stays). The connections page and a held button's
+ * panel take it over; the throat and the step strip above stay. */
+#define AREA_Y 140                              /* the keyboard's top .. */
+#define AREA_H 78                               /* .. to the bottom text line's end */
+static void lower_again(void)                   /* the keyboard and the line under it, whole again */
+{
+    lcd_fill(0, AREA_Y, 240, AREA_H, C_BG);     /* (the gaps around them too) */
+    ui.lit_drawn = ~0u;
+    ui.touched_id_drawn = ~0u;
+    ui.bottom_drawn = 0;
+    if (ui.say_shown) ui.say_new = 1;           /* a message still up: again */
+}
+static void link_arrow(int32_t y, int up)      /* a 9 x 5 triangle at the right edge, as Amenity's */
+{
+    int32_t r;
+    for (r = 0; r < 5; r++)
+        cv_rect(222 + (up ? 4 - r : r), y + r, 1 + 2 * (up ? r : 4 - r), 1, C_DIMT);
+}
 static void draw_link(void)
 {
     char t[40], name[24];
     int n = btdev_count(), u = plat_usb_host_state(), rows = link_devrows(), first, i;
-    int32_t y = 26;
-    cv_begin(240, THROAT_H, C_BG);
-    cv_text_over(6, 4, &FONT_S, "CONNECTIONS", C_TEXT);
+    int32_t y = 14;
+    cv_begin(240, AREA_H, C_BG);                /* in the lower area, as a held button's panel: the same header */
+    cv_text_over(6, 1, &FONT_XS, "EDIT", C_LIT);
+    cv_text_over(6 + text_w(&FONT_XS, "EDIT") + 9, 1, &FONT_XS, "CONNECTIONS", C_DIMT);
     {
         const char *c = plat_ble_connected() ? "COMPUTER: BT" : "";
-        cv_text_over(234 - text_w(&FONT_XS, c), 6, &FONT_XS, c, C_KEY);
+        cv_text_over(234 - text_w(&FONT_XS, c), 1, &FONT_XS, c, C_KEY);
     }
-    first = ui.link_row < rows ? (int)ui.link_row - 2 : rows - 3;     /* three device rows at most, the cursor's
-                                                                         * in view */
-    first = first > rows - 3 ? rows - 3 : first;
+    first = ui.link_row < rows ? (int)ui.link_row - 1 : rows - 2;     /* two device rows at most, as Amenity's,
+                                                                         * the cursor's in view */
+    first = first > rows - 2 ? rows - 2 : first;
     first = first < 0 ? 0 : first;
     if (btdev_busy()) {
         t[0] = 0;
@@ -1397,13 +1420,23 @@ static void draw_link(void)
         text_cat(t, btdev_ready() ? "  CONNECTED" : "  CONNECTING");
         t[26] = 0;                                  /* (what fits) */
         link_row(y, 0, "BT", t, btdev_ready() ? C_KEY : C_DIMT);
+        y += 16;
+    } else if (plat_ble_linked()) {                 /* the other side connected to us (its name is not known here) */
+        link_row(y, 0, "BT", "CONNECTED", C_KEY);
+        y += 16;
     } else if (!n) {
         link_row(y, 0, "BT", "LOOKING...", C_DIMT);
-    } else
-        for (i = first; i < first + 3 && i < n; i++, y += 16)
+        y += 16;
+    } else {
+        for (i = first; i < first + 2 && i < n; i++, y += 16)
             if (btdev_found(i, name, 0))
                 link_row(y, i, i == first ? "BT" : 0, upper(name), C_TEXT);
-    y = 26 + 3 * 16;
+        if (first > 0)                              /* more devices above / below: a small arrow at the right */
+            link_arrow(14 + 4, 1);
+        if (first + 2 < n)
+            link_arrow(30 + 4, 0);
+    }
+    /* (USB right under the last BT row) */
     if (u == USBH_OFF)
         link_row(y, rows, "USB", "DEVICE", C_TEXT);
     else if (u == USBH_CONNECTED) {
@@ -1415,16 +1448,19 @@ static void draw_link(void)
         link_row(y, rows, "USB", t, C_KEY);
     } else
         link_row(y, rows, "USB", "HOST - LOOKING", C_DIMT);
-    {
-        const char *hint = "SELECT MOVE   EDIT BACK";
-        cv_text_over(234 - text_w(&FONT_XS, hint), 98, &FONT_XS, hint, C_DIMT);
-        if (link_action()[0]) {                     /* what SAVE does on the row: "SAVE CONNECT" */
-            char a[24] = "SAVE ";
+    if (ui.say_shown)                           /* a message (NO ANSWER, DEVICE LOST ..): where the hints are, for
+                                                  * its moment (the line under the keyboard is the page's now) */
+        cv_text_over(6, 64, &FONT_XS, ui.say, C_TEXT);
+    else {
+        const char *hint = "SELECT=MOVE  EDIT=BACK";
+        cv_text_over(234 - text_w(&FONT_XS, hint), 64, &FONT_XS, hint, C_DIMT);
+        if (link_action()[0]) {                     /* what SAVE does on the row: "SAVE=CONNECT" */
+            char a[24] = "SAVE=";
             text_cat(a, link_action());
-            cv_text_over(6, 98, &FONT_XS, a, C_LIT);
+            cv_text_over(6, 64, &FONT_XS, a, C_LIT);
         }
     }
-    cv_blit(0, 0);
+    cv_blit(0, AREA_Y);
 }
 static void link_poll(void)                     /* every frame: the scan, what happened, the page */
 {
@@ -1453,12 +1489,143 @@ static void link_poll(void)                     /* every frame: the scan, what h
     if (!ui.page_link)
         return;
     sig = (uint32_t)btdev_count() | (uint32_t)btdev_pick() << 4 | (uint32_t)btdev_busy() << 8 |
-          (uint32_t)btdev_ready() << 9 | (uint32_t)plat_ble_connected() << 10 | (uint32_t)plat_usb_host_state() << 11 |
-          (uint32_t)ui.link_row << 14 | 1u << 31;
-    if (sig != ui.link_sig || now - ui.link_ms >= 500u) {   /* (the names found may change: twice a second) */
+          (uint32_t)btdev_ready() << 9 | (uint32_t)plat_ble_connected() << 10 | (uint32_t)plat_ble_linked() << 13 | (uint32_t)plat_usb_host_state() << 11 |
+          (uint32_t)ui.link_row << 14 | (uint32_t)ui.say_shown << 30 | 1u << 31;
+    sig ^= ui.say_shown ? ui.say_until * 2654435761u : 0u;   /* (a new message while one is up) */
+    if (ui.hold_b != NB)                        /* a held button's panel is over it: drawn again when let go */
+        return;
+    if (sig != ui.link_sig || now - ui.link_ms >= 500u) {  /* (the names found may change: twice a second) */
         ui.link_sig = sig;
         ui.link_ms = now;
         draw_link();
+    }
+}
+/* ---- what a held button does: while LFO, ENV, FX, SEQ, ARP, SEL or SAVE is held (GLO too while recording) for
+ * HOLD_MS, the keyboard and the line under it make way for a panel (the throat and the step strip stay): the button's
+ * name and what it is for, then each control it changes with its value now, as the knobs turn. A tap (ENV, GLO and
+ * SEL do something of their own when tapped in record mode) shows nothing. Let go: the keyboard again. */
+#define HOLD_MS 250u
+enum { HOLD_ROWS = 4 };
+static const uint8_t HOLD_ORDER[] = {B_SEQ, B_ARP, B_LFO, B_ENV, B_FX, B_SEL, B_SAVE, B_GLO};
+static struct {
+    const char *title, *hint, *ctl[HOLD_ROWS];
+    char text[HOLD_ROWS][32];
+    uint32_t n;
+} hp;
+
+static uint32_t hold_which(uint32_t btn)        /* the held button with a panel (the first of HOLD_ORDER), else NB */
+{
+    uint32_t i;
+    for (i = 0; i < sizeof HOLD_ORDER; i++)
+        if (btn >> HOLD_ORDER[i] & 1u && (HOLD_ORDER[i] != B_GLO || ui.rec_mode))
+            return HOLD_ORDER[i];
+    return NB;
+}
+static void hold_row(const char *ctl, uint32_t id, int32_t val, const char *text)   /* id ~0u: text as it is */
+{
+    hp.ctl[hp.n] = ctl;
+    if (id != ~0u) touched_text(hp.text[hp.n], id, val);
+    else { hp.text[hp.n][0] = 0; text_cat(hp.text[hp.n], text); }
+    hp.n++;
+}
+static void hold_make(uint32_t b)               /* the panel of button b, into hp: the title is the button's name */
+{
+    char t[12] = "PATTERN ";
+    int_text(t + 8, set.slot + 1);
+    hp.n = 0;
+    switch (b) {
+    case B_LFO:
+        hp.title = "LFO"; hp.hint = "THE VOWEL MOVES ON ITS OWN";
+        hold_row("K1", 6, par.lfoXRate, 0); hold_row("K2", 7, par.lfoXDepth, 0);
+        hold_row("K3", 8, par.lfoYRate, 0); hold_row("K4", 9, par.lfoYDepth, 0);
+        break;
+    case B_ENV:
+        hp.title = "ENV"; hp.hint = ui.rec_mode ? "TAP: ACCENT, KEY: ACCENTED NOTE" : "THE 303 ENVELOPE";
+        hold_row("K1", 13, par.decay, 0); hold_row("K2", 14, par.envmod, 0);
+        hold_row("K3", 15, par.accent, 0); hold_row("K4", 16, par.ampdec, 0);
+        break;
+    case B_FX:
+        hp.title = "FX"; hp.hint = "DELAY AND DRIVE";
+        hold_row("K1", 29, par.dlymix, 0); hold_row("K2", 28, par.dlyfb, 0);
+        hold_row("K3", 27, par.dlydiv, 0); hold_row("K4", 26, par.drive, 0);
+        break;
+    case B_SEQ:
+        hp.title = "SEQ"; hp.hint = "KEY: THE PATTERN STARTS ON IT";
+        hold_row("SELECT", 11, set.bpm, 0);
+        hold_row("KEY", 25, seq_transpose, 0);
+        hold_row("OCT", ~0u, 0, "PATTERN OCTAVE DOWN/UP");
+        break;
+    case B_ARP:
+        hp.title = "ARP"; hp.hint = "THE RANDOMIZER";
+        hold_row("PLAY", ~0u, 0, "NEW RANDOM PATTERN");
+        hold_row("KEY", ~0u, 0, "ROOT + RANDOM PATTERN");   /* the key pressed is the new root */
+        hold_row("SELECT", 18, set.scale, 0);
+        hold_row("NOW", 19, set.root, 0);       /* the root now, as SEL's and SAVE's NOW */
+        break;
+    case B_SEL:
+        hp.title = "SEL"; hp.hint = sq_running ? "LOAD (AT STEP 1)" : "LOAD A PATTERN";
+        hold_row("KEY", ~0u, 0, "LOAD THAT PATTERN");
+        hold_row("NOW", ~0u, 0, t);
+        hold_row("", ~0u, 0, "GLOWING KEYS: STORED");
+        if (ui.rec_mode) hold_row("TAP", ~0u, 0, "A REST ON THE STEP");
+        break;
+    case B_SAVE:
+        hp.title = "SAVE"; hp.hint = "STORE THE PATTERN";
+        hold_row("KEY", ~0u, 0, "STORE IT THERE");
+        hold_row("NOW", ~0u, 0, t);
+        hold_row("", ~0u, 0, "GLOWING KEYS: STORED");
+        break;
+    default:                                    /* B_GLO, recording */
+        hp.title = "GLO"; hp.hint = "SLIDE";
+        hold_row("TAP", ~0u, 0, "SLIDE ON THE STEP");
+        hold_row("KEY", ~0u, 0, "RECORD A SLIDING NOTE");
+        break;
+    }
+}
+static void draw_hold(void)                     /* hp, in the keyboard's place */
+{
+    uint32_t i;
+    int32_t y = 14;
+    cv_begin(240, AREA_H, C_BG);
+    cv_text_over(6, 1, &FONT_XS, hp.title, C_LIT);
+    cv_text_over(6 + text_w(&FONT_XS, hp.title) + 9, 1, &FONT_XS, hp.hint, C_DIMT);
+    for (i = 0; i < hp.n; i++, y += 16) {
+        const felucca_font_t *f = text_w(&FONT_S, hp.text[i]) <= 184 ? &FONT_S : &FONT_XS;   /* (what fits) */
+        cv_text_over(6, y + 2, &FONT_XS, hp.ctl[i], C_DIMT);
+        cv_text_over(52, y + (f == &FONT_S ? 0 : 2), f, hp.text[i], C_KEY);
+    }
+    cv_blit(0, AREA_Y);
+}
+static void hold_poll(uint32_t btn, uint32_t now)   /* every pass: the panel up, current, or gone */
+{
+    uint32_t b = hold_which(btn), i;
+    char sig[sizeof ui.hold_drawn];
+    if (b != ui.hold_cand) { ui.hold_cand = (uint8_t)b; ui.hold_ms = now; }
+    if (b != NB && b != ui.hold_b && now - ui.hold_ms >= HOLD_MS) {
+        ui.hold_b = (uint8_t)b;
+        ui.hold_drawn[0] = 0;                   /* (drawn below) */
+    } else if (b != ui.hold_b && ui.hold_b != NB) {   /* let go: what was there again */
+        ui.hold_b = NB;
+        if (ui.page_link) ui.link_sig = 0;    /* the connections page again, or the keyboard */
+        else lower_again();
+    }
+    if (ui.hold_b == NB)
+        return;
+    hold_make(ui.hold_b);
+    {                                           /* what it shows, to redraw only on a change */
+        uint32_t k = 0, j;
+        const char *part;
+        for (i = 0; i < hp.n + 2u; i++)
+            for (part = i == 0 ? hp.title : i == 1 ? hp.hint : hp.text[i - 2u]; *part && k < sizeof sig - 2u; )
+                sig[k++] = *part++;
+        sig[k] = 0;
+        for (j = 0; j <= k && sig[j] == ui.hold_drawn[j]; j++)
+            ;
+        if (j <= k && lcd_idle()) {             /* changed */
+            for (j = 0; j <= k; j++)
+                ui.hold_drawn[j] = sig[j];
+            draw_hold();
+        }
     }
 }
 
@@ -1570,14 +1737,11 @@ static void pass(void)
         touched_id = 12; touched_val = ui.rec_step;
     }
     ui.sel_pending &= ~rel;
-    if (b & (1u << B_EDIT)) {                   /* the connections page, or back to the throat */
+    if (b & (1u << B_EDIT)) {                   /* the connections page (in the lower area), or back to the keys */
         ui.page_link = !ui.page_link;
         ui.link_sig = 0;
-        if (!ui.page_link) {                    /* the throat again, whole */
-            ui.thr_x = ui.thr_y = -100;
-            ui.note_drawn = ~0u;
-            ui.thr_row = THROAT_H;
-        }
+        if (!ui.page_link && ui.hold_b == NB)
+            lower_again();
     }
     ui.save_pending |= b & (1u << B_SAVE);      /* SAVE tapped on the page: the row's action (on release: held
                                                   * through a key it stores a pattern instead) */
@@ -1701,6 +1865,7 @@ static void pass(void)
     if (set.oct < 0) led_b |= 1u << B_OCTDN;
     if (set.oct > 0) led_b |= 1u << B_OCTUP;
     if (ui.rec_mode) led_b |= 1u << B_REC;
+    if (ui.page_link) led_b |= 1u << B_EDIT;    /* EDIT: lit while the connections page is up, else it glows */
     if (sq_running) led_b |= 1u << B_PLAY;
     {                                            /* GLO = slide, ENV = accent: GLO glows softly in record mode
                                                    * (ENV always); lit while held (GLO: in record mode), or when
@@ -1708,7 +1873,7 @@ static void pass(void)
                                                    * step that sounds if it has it */
         uint32_t f = ui.rec_mode ? set.step[ui.rec_step].flags
                    : sq_running ? set.step[(sq_step + (int32_t)NSTEP - 1) % (int32_t)NSTEP].flags : 0u;
-        dim_b = 1u << B_LFO | 1u << B_ENV | 1u << B_FX | 1u << B_SEQ | 1u << B_ARP | 1u << B_SEL | 1u << B_SAVE;
+        dim_b = 1u << B_LFO | 1u << B_ENV | 1u << B_FX | 1u << B_SEQ | 1u << B_ARP | 1u << B_SEL | 1u << B_SAVE | 1u << B_EDIT;
         if (ui.rec_mode) dim_b |= 1u << B_GLO;
         if ((ui.rec_mode && (btn & (1u << B_GLO))) || (f & 2u)) led_b |= 1u << B_GLO;
         if ((btn & (1u << B_ENV)) || (f & 4u)) led_b |= 1u << B_ENV;
@@ -1719,8 +1884,9 @@ static void pass(void)
     if (ui.rec_mode) vow_lock = (int32_t)STEP_VOW(set.step[ui.rec_step].flags);   /* hear and see the step */
     else if (!sq_running) vow_lock = 0;
 
-    if (lit != ui.lit_drawn) { ui.lit_drawn = lit; draw_keys(lit); }   /* redraw only what changed */
-    if (!ui.page_link) {                         /* the throat: redrawn when the vowel (with the LFOs) or the
+    hold_poll(btn, now);                         /* a held button: its panel in the keyboard's place */
+    if (ui.hold_b == NB && !ui.page_link && lit != ui.lit_drawn) { ui.lit_drawn = lit; draw_keys(lit); }   /* only what changed */
+    {                                            /* the throat (the pages are below it): redrawn when the vowel or the
                                                    * note changes, at most ~20 times a second, in 16-row chunks,
                                                    * each started only once the LCD has sent the last one -- so
                                                    * the main loop (and the sequencer in it) never waits for the
@@ -1762,24 +1928,28 @@ static void pass(void)
             if (ui.flags_drawn[k] != set.step[k].flags) { ui.flags_drawn[k] = set.step[k].flags; changed = 1; }
         if (changed) { ui.mark_drawn = mark; draw_steps(set.step, mark); }
     }
-    /* the bottom text line: a message for a moment (app_say), else the last knob moved, else the name */
-    if (ui.say_new) {
-        ui.say_new = 0;
-        ui.say_shown = 1;
-        text_box(0, 199, 240, &FONT_S, ui.say, C_TEXT);
-    } else if (ui.say_shown && (int32_t)(now - ui.say_until) >= 0) {
-        ui.say_shown = 0;
-        ui.touched_id_drawn = ~0u;
-        ui.bottom_drawn = 0;
-    }
-    if (!ui.say_shown) {
-        if (touched_id != ~0u && (touched_id != ui.touched_id_drawn || touched_val != ui.touched_val_drawn)) {
-            ui.touched_id_drawn = touched_id; ui.touched_val_drawn = touched_val;
-            draw_touched(touched_id, touched_val);
-        } else if (touched_id == ~0u && !ui.bottom_drawn) {
-            text_box(0, 199, 240, &FONT_S, APP_NAME "  v" APP_VERSION, C_TEXT);   /* until a knob is touched */
+    /* the bottom text line: a message for a moment (app_say), else the last knob moved, else the name. Its time runs
+     * on under a held button's panel or the connections page (which shows a message itself), drawn only when free */
+    {
+        int free_line = ui.hold_b == NB && !ui.page_link;
+        if (ui.say_new) {
+            ui.say_new = 0;
+            ui.say_shown = 1;
+            if (free_line) text_box(0, 199, 240, &FONT_S, ui.say, C_TEXT);
+        } else if (ui.say_shown && (int32_t)(now - ui.say_until) >= 0) {
+            ui.say_shown = 0;
+            ui.touched_id_drawn = ~0u;
+            ui.bottom_drawn = 0;
         }
-        ui.bottom_drawn = 1;
+        if (free_line && !ui.say_shown) {
+            if (touched_id != ~0u && (touched_id != ui.touched_id_drawn || touched_val != ui.touched_val_drawn)) {
+                ui.touched_id_drawn = touched_id; ui.touched_val_drawn = touched_val;
+                draw_touched(touched_id, touched_val);
+            } else if (touched_id == ~0u && !ui.bottom_drawn) {
+                text_box(0, 199, 240, &FONT_S, APP_NAME "  v" APP_VERSION, C_TEXT);   /* until a knob is touched */
+            }
+            ui.bottom_drawn = 1;
+        }
     }
 #ifndef PLAT_HOST
     if (dbg_us_now != ui.isr_now_drawn || dbg_us_max != ui.isr_max_drawn) {
@@ -1805,6 +1975,55 @@ void app_frame(void)
     speak();
 }
 
+/* ---- the splash (APP_SPLASH), as Amenity's: the picture (assets/splash.png, drawn by tools/splash_art.py, coded by
+ * tools/make_splash.py: a palette and run-length coded indices), three bands of 80 rows through the canvas (it holds
+ * 240 x 114), the version written under the throat: always the build's own */
+#ifdef APP_SPLASH
+#include "../build/splash.inc"
+void app_splash(void)
+{
+    uint32_t at = 0, left = 0, lit = 0, band, y, x;
+    uint8_t ix = 0;
+    for (band = 0; band < 3u; band++) {
+        cv_begin(240, 80, C_BG);
+        for (y = 0; y < 80u; y++)
+            for (x = 0; x < 240u; x++) {
+                if (!left) {                     /* the next run or the next literals */
+                    uint8_t n = at < sizeof SPLASH_RLE ? SPLASH_RLE[at++] : 0u;
+                    lit = n >= 128u;
+                    left = lit ? n - 127u : n + 1u;
+                    if (!lit)
+                        ix = at < sizeof SPLASH_RLE ? SPLASH_RLE[at++] : 0u;
+                }
+                if (lit)
+                    ix = at < sizeof SPLASH_RLE ? SPLASH_RLE[at++] : 0u;
+                left--;
+                cv_pset((int32_t)x, (int32_t)y, SPLASH_PAL[ix]);   /* (256 entries: any index) */
+            }
+        if (band == 2u) {                        /* the version, on the dark line the picture keeps for it */
+            char v[24] = "";
+            if (APP_VERSION[0] >= '0' && APP_VERSION[0] <= '9')
+                text_cat(v, "V");
+            text_cat(v, APP_VERSION);
+            cv_text_over((240 - text_w(&FONT_XS, v)) / 2, 226 - 160, &FONT_XS, v, C_TEXT);
+        }
+        cv_blit(0, band * 80u);
+    }
+}
+
+#if defined APP_HOST_CMD && defined PLAT_HOST
+int app_host_cmd(const char *cmd, const char *a, const char *b, const char *c, const char *d)
+{
+    (void)a, (void)b, (void)c, (void)d;
+    if (!strcmp(cmd, "splash")) {                /* the boot screen (the simulator's boot skips it) */
+        app_splash();
+        return 1;
+    }
+    return 0;
+}
+#endif
+#endif
+
 #ifdef PLAT_HOST
 /* the host simulator's checks (base/host/plat_host.c "expect") */
 int app_expect(const char *what, int *got)
@@ -1818,6 +2037,7 @@ int app_expect(const char *what, int *got)
     else if (!strcmp(what, "bpm")) *got = set.bpm;
     else if (!strcmp(what, "used")) *got = set.used;
     else if (!strcmp(what, "page")) *got = ui.page_link;
+    else if (!strcmp(what, "hold")) *got = ui.hold_b == NB ? -1 : ui.hold_b;   /* the held button's panel (B_*) */
     else return 0;
     return 1;
 }

@@ -1,0 +1,5 @@
+# The splash: the silly throat with the name (assets/splash.png, tools/splash_art.py) and the version under it
+#   sh build.sh --host && app/build/host/fmlarynx_host app/tests/splash.txt build/splash
+wait 100
+splash
+shot splash.png
