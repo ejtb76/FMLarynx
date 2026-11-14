@@ -38,3 +38,15 @@ expect step 2
 wait 1200
 expect step >5
 tap PLAY
+# the delay follows the tempo the sequence plays at: ours (120 BPM, 3/16: 16537 frames), an outside clock's as
+# followed (25 ms a pulse: 100 BPM, 19845 frames), ours again once that clock has gone
+expect delay >16535
+expect delay <16539
+midi FA 00 00
+clock 72 25
+expect delay >19842
+expect delay <19848
+midi FC 00 00
+wait 1000
+expect delay >16535
+expect delay <16539

@@ -165,7 +165,9 @@ static int16_t dly_l[DLY_N] __attribute__((section(".pool")));
 static int16_t dly_r[DLY_N] __attribute__((section(".pool")));
 static const uint8_t DLY_16THS[5] = {1, 2, 3, 4, 6};   /* 1/16, 1/8, 3/16 (the acid classic), 1/4, 3/8 */
 static uint32_t dly_pos;
-static volatile uint32_t dly_len = 16537;       /* frames; set by the main loop from the tempo */
+static volatile uint32_t dly_len = 16537;       /* frames; set by the main loop from the tempo the sequence
+                                                  * plays at (ours, or the outside clock's as followed) */
+static uint32_t dly_cur = 16537, dly_slew;      /* the length the line reads at now, gliding to dly_len */
 static int32_t dly_fl, dly_fr;                  /* the feedback paths' low-pass state */
 
 static int32_t drive_px(int32_t s)              /* Drive: up to 32x into a cubic soft clip, with makeup */
@@ -183,10 +185,16 @@ static int16_t sat16(int32_t v) { return (int16_t)(v > 32767 ? 32767 : v < -3276
 
 static void delay_px(int32_t *out, uint32_t n)   /* out: stereo, the voice already in it (L = R) */
 {
-    uint32_t i, len = dly_len;
+    uint32_t i, to = dly_len;
     int32_t fb = par.dlyfb * 900 / 1000, mix = par.dlymix;   /* feedback capped at 0.9: no runaway */
+    if ((to > dly_cur ? to - dly_cur : dly_cur - to) > to / 20u)
+        dly_cur = to;                           /* a big change (another division, a new tempo): at once */
     for (i = 0; i < n; i++) {
-        uint32_t r = (dly_pos - len) & (DLY_N - 1u);
+        uint32_t r;
+        if (dly_cur != to && !(++dly_slew & 3u))   /* a small one (a tempo nudged or drifting): glides there, a
+                                                  * frame every 4 (the echoes bend a little, as on tape), no click */
+            dly_cur += dly_cur < to ? 1u : (uint32_t)-1;
+        r = (dly_pos - dly_cur) & (DLY_N - 1u);
         int32_t l = dly_l[r], rr = dly_r[r];
         dly_fl += ((rr - dly_fl) * 14745) >> 15;   /* each echo a bit darker: one-pole, k = 0.45 */
         dly_fr += ((l - dly_fr) * 14745) >> 15;
@@ -1135,6 +1143,7 @@ static volatile int32_t sq_load_next = -1;      /* main loop: a stored pattern q
 static volatile int32_t sq_loaded;              /* .. audio interrupt: it came in (its number + 1), for the screen */
 static volatile uint8_t sq_req;                 /* main loop asks the audio interrupt: PLAY's Start or Stop */
 static volatile uint8_t clock_ext;              /* tick: an outside clock is followed (larynx_clock) */
+static volatile uint16_t clock_bpm_x10;         /* tick: its tempo as the loop found it (BPM x 10) */
 static uint32_t clk_count, clk_first;           /* audio interrupt: pulses since the last step; the next plays step 1 */
 static uint32_t int_acc;                        /* ours: frames x BPM x 24 into the pulse */
 static uint32_t ext_k;                          /* outside: the next pulse to play, counted from the Start's first */
@@ -1313,6 +1322,7 @@ void app_tick(void)
     }
     now = now24();                              /* (after the reads: their stamps may be later than the tick's start) */
     clock_ext = (uint8_t)larynx_clock(&bpm, now);
+    clock_bpm_x10 = (uint16_t)(bpm > 65535u ? 65535u : bpm);
     while (outq_r != outq_w) {
         uint32_t r = outq_r;
         if ((int32_t)(now - outq[r % OUTQ].at) < 0)
@@ -1788,9 +1798,16 @@ static void pass(void)
         if (lfo) knob(&par.lfoYDepth, d, 20, 0, 1000, 9); else if (env) knob(&par.ampdec, d, 20, 0, 1000, 16);
         else if (fx) knob(&par.drive, d, 20, 0, 1000, 26);
         else knob(&par.cutoff, d, 20,    0, 1000, 3);
-        {                                        /* the delay time in frames, from the tempo */
-            uint32_t len = DLY_16THS[par.dlydiv] * 661500u / (uint32_t)set.bpm;   /* 16ths * 15 s/bpm * 44.1 k */
-            dly_len = len < DLY_N - 1u ? len : DLY_N - 1u;   /* slow tempos: as long as the line goes */
+        {                                        /* the delay time in frames, from the tempo the sequence plays at:
+                                                   * ours, or while following an outside clock the tempo the loop
+                                                   * found (larynx_clock.c, to 0.1 BPM) */
+            uint32_t bx10 = (uint32_t)set.bpm * 10u, ext = clock_bpm_x10, len;
+            if (clock_ext && ext >= 200u && ext <= 6000u)
+                bx10 = ext;
+            len = DLY_16THS[par.dlydiv] * 6615000u / bx10;   /* 16ths * 15 s/bpm * 44.1 k */
+            len = len < DLY_N - 1u ? len : DLY_N - 1u;   /* slow tempos: as long as the line goes */
+            if (len > dly_len + 1u || len + 1u < dly_len)   /* (a frame either way: the loop's last digit) */
+                dly_len = len;
         }
         knob(&par.x, plat_enc(EN_ALGO), 20, 0, 1000, 4);
         d = plat_enc(EN_SELECT);                 /* Y normally; steps while recording; tempo under SEQ; the
@@ -2037,6 +2054,7 @@ int app_expect(const char *what, int *got)
     else if (!strcmp(what, "bpm")) *got = set.bpm;
     else if (!strcmp(what, "used")) *got = set.used;
     else if (!strcmp(what, "page")) *got = ui.page_link;
+    else if (!strcmp(what, "delay")) *got = (int)dly_len;   /* the delay line's length, frames */
     else if (!strcmp(what, "hold")) *got = ui.hold_b == NB ? -1 : ui.hold_b;   /* the held button's panel (B_*) */
     else return 0;
     return 1;
