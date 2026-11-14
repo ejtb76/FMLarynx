@@ -13,6 +13,7 @@
  * The sound is integer arithmetic, as it was on Dinghy; its 64-bit multiplies go through noinline helpers (the
  * CPU's erratum, felucca-bsp docs/CPU.md). */
 #include "larynx_mul.h"
+#include "btdev.h"                        /* Bluetooth MIDI devices: the connections page (EDIT) */
 
 /* ---- the sound (runs in the audio ISR: keep it short, no flash, no screen)
  * FormantSynth prototype: our real plugin (JUCE, see Source/PluginProcessor.h) is monophonic
@@ -411,7 +412,7 @@ effects:
                                                   * never plays stale echoes */
 }
 
-#define MIDI_TO TO_USB
+#define MIDI_TO (TO_USB | TO_BLE)                 /* notes out: USB (or the device it hosts) and Bluetooth */
 static void midi_send(uint32_t st, uint32_t d1, uint32_t d2)   /* a channel message, from the main loop */
 {
     plat_midi_send((st >> 4) | st << 8 | (d1 & 0x7Fu) << 16 | (d2 & 0x7Fu) << 24, MIDI_TO);
@@ -963,8 +964,15 @@ static struct {
     uint8_t flags_drawn[NSTEP];                 /* what draw_steps() last showed; mark_drawn -2 forces the
                                                   * first draw */
     int32_t rec_mode, rec_step, seq_running, seq_step;
-    uint32_t seq_next_ms, seq_off_ms;           /* next step; when the note of this one lets go */
-    uint32_t midiclk_last_ms, midiclk_count;
+    uint32_t clk_count;                         /* pulses since the last step (6 a step; 3: the note lets go) */
+    uint32_t clk_first;                         /* started: the next pulse plays step 1 */
+    uint32_t ext_ms;                            /* the last clock, Start or Continue from outside */
+    uint32_t pulses_seen;                       /* the internal clock's pulses taken (clk_pulses) */
+    uint32_t extq[32], extq_r, extq_w;          /* outside pulses, each when it is due (plat_ticks24's clock) */
+    uint8_t page_link;                          /* the connections page is up (EDIT) */
+    uint8_t link_row;                           /* its cursor (SELECT moves it, SAVE enters) */
+    uint32_t link_sig, link_ms;                 /* what it showed, and when */
+    uint32_t save_pending;                      /* SAVE pressed, not yet used to store: on the page, enter */
     uint32_t touched_id_drawn;
     int32_t touched_val_drawn;
     uint32_t isr_now_drawn, isr_max_drawn;
@@ -972,7 +980,7 @@ static struct {
     char say[32];                               /* app_say's message on the bottom text line, until say_until */
     uint32_t say_until;
     uint8_t say_new, say_shown, bottom_drawn;
-} ui = {.load_next = -1, .midiclk_last_ms = 0u - 1000u};   /* "ages ago": starts on the internal clock */
+} ui = {.load_next = -1, .ext_ms = 0u - 1000u};   /* "ages ago": starts on the internal clock */
 
 void app_init(void)
 {
@@ -1059,6 +1067,238 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
 #endif
 }
 
+/* ---- the clock: 24 pulses a quarter note, a step every 6, its note let go at 3 (unless it ties). The pulses come
+ * from outside (MIDI clock over USB, TRS or Bluetooth; a Start arms, the first pulse after it plays step 1) or, when
+ * no outside clock has come for 500 ms, from the internal clock: the 1 kHz tick makes them at the tempo and sends
+ * them out (with Start and Stop) to USB and Bluetooth, so another FM-1 follows. Bluetooth's pulses are taken at the
+ * sender's time (ble_midi_time) plus BLE_LATE, which takes out the connection's bunching; USB's and TRS's at once. */
+#define BLE_LATE (20u * 24000u)                 /* 20 ms, on plat_ticks24's clock */
+#define CLK_TO (TO_USB | TO_BLE)
+static volatile uint8_t clk_run_int;            /* main loop: the sequencer runs on the internal clock */
+static volatile uint8_t clk_start_req, clk_stop_req;   /* main loop asks the tick: Start (and the first pulse), Stop */
+static volatile uint16_t clk_bpm = 120;
+static volatile uint32_t clk_pulses;            /* tick: the internal pulses made */
+static uint32_t clk_acc;                        /* tick: bpm x microseconds into the pulse (2,500,000 a pulse) */
+
+void app_tick(void)                             /* 1 kHz, in the timer interrupt */
+{
+    if (clk_stop_req) {
+        clk_stop_req = 0;
+        plat_midi_send(0x0Fu | 0xFCu << 8, CLK_TO);
+    }
+    if (clk_start_req) {                        /* Start, and the first pulse with it: step 1 */
+        clk_start_req = 0;
+        clk_acc = 0;
+        plat_midi_send(0x0Fu | 0xFAu << 8, CLK_TO);
+        plat_midi_send(0x0Fu | 0xF8u << 8, CLK_TO);
+        clk_pulses++;
+        return;
+    }
+    if (!clk_run_int)
+        return;
+    clk_acc += 1000u * clk_bpm;
+    if (clk_acc >= 2500000u) {
+        clk_acc -= 2500000u;
+        plat_midi_send(0x0Fu | 0xF8u << 8, CLK_TO);
+        clk_pulses++;
+    }
+}
+
+static uint32_t now24(void)
+{
+#ifdef PLAT_HOST
+    return plat_ms() * 24000u;                  /* (the simulator's plat_ticks24 is real time) */
+#else
+    return plat_ticks24();
+#endif
+}
+
+static void seq_step_now(void)                  /* the next step sounds */
+{
+    if (ui.seq_step == 0 && ui.load_next >= 0) {   /* a queued pattern comes in on step 1 */
+        slot_apply(set.step, &set.root, &set.scale, &set.bank[ui.load_next]);
+        set.slot = (uint8_t)ui.load_next; ui.dirty = 1; ui.t_change = plat_ms();
+        touched_id = 22; touched_val = ui.load_next + 1; ui.load_next = -1;
+    }
+    seq_trigger(&set.step[ui.seq_step]);
+    ui.seq_step = (ui.seq_step + 1) % (int32_t)NSTEP;
+}
+
+static void on_pulse(void)
+{
+    if (!ui.seq_running || ui.rec_mode)
+        return;
+    if (ui.clk_first) {
+        ui.clk_first = 0;
+        ui.clk_count = 0;
+        seq_step_now();
+    } else if (++ui.clk_count == 3u) {
+        seq_release();                          /* half a 16th: the note lets go unless it ties */
+    } else if (ui.clk_count >= 6u) {
+        ui.clk_count = 0;
+        seq_step_now();
+    }
+}
+
+static int ext_clock(uint32_t now) { return now - ui.ext_ms <= 500u; }
+
+static void seq_start(uint32_t now)             /* PLAY: from step 1, on our clock unless one comes from outside */
+{
+    ui.seq_running = 1;
+    ui.seq_step = 0;
+    ui.clk_first = 1;
+    if (!ext_clock(now))
+        clk_start_req = 1;
+}
+static void seq_stop(uint32_t now)
+{
+    if (ui.seq_running && !ext_clock(now))
+        clk_stop_req = 1;
+    ui.seq_running = 0;
+    seq_halt();
+}
+
+static void text_cat(char *d, const char *s)
+{
+    while (*d)
+        d++;
+    while (*s)
+        *d++ = *s++;
+    *d = 0;
+}
+
+static const char *upper(const char *s)         /* in capitals, as the screen writes (at most 31 characters) */
+{
+    static char u[32];
+    unsigned i;
+    for (i = 0; i < 31u && s[i]; i++)
+        u[i] = s[i] >= 'a' && s[i] <= 'z' ? (char)(s[i] - 32) : s[i];
+    u[i] = 0;
+    return u;
+}
+
+/* ---- the connections page (EDIT), in the throat's place: the Bluetooth MIDI devices found (lib/btdev: the scan
+ * while it is up; the one connected), then the USB port's role (DEVICE, to a computer, or HOST to a MIDI device such
+ * as another FM-1), as a list: SELECT moves the cursor, SAVE does what the row's action says, EDIT goes back. The
+ * notes and the clock go to all of them; a Start from any of them is followed. As Amenity's. */
+static int link_devrows(void) { return btdev_busy() ? 1 : btdev_count() ? btdev_count() : 1; }
+static int link_usb_row(void) { return link_devrows(); }
+static const char *link_action(void)
+{
+    if (ui.link_row >= link_usb_row())
+        return plat_usb_host_state() == USBH_OFF ? "HOST" : "DEVICE";
+    return btdev_busy() ? "LET GO" : btdev_count() ? "CONNECT" : "";
+}
+static void link_enter(void)
+{
+    if (ui.link_row >= link_usb_row()) {
+        plat_usb_host(plat_usb_host_state() == USBH_OFF);
+        return;
+    }
+    if (btdev_busy() || btdev_count()) {
+        int ev;
+        if (!btdev_busy())
+            btdev_choose(ui.link_row);
+        ev = btdev_save();
+        app_say(ev == BTDEV_CONNECTING ? "CONNECTING" : "BLUETOOTH",
+                ev == BTDEV_CONNECTING ? upper(btdev_name()) : btdev_word(ev));
+    }
+}
+static void link_row(int32_t y, int row, const char *label, const char *text, uint16_t c)
+{
+    int on = ui.link_row == row;
+    if (label)
+        cv_text_over(6, y + 2, &FONT_XS, label, C_DIMT);
+    if (on)
+        cv_text_over(34, y, &FONT_S, ">", C_LIT);
+    cv_text_over(44, y, &FONT_S, text, on ? C_LIT : c);
+}
+static void draw_link(void)
+{
+    char t[40], name[24];
+    int n = btdev_count(), u = plat_usb_host_state(), rows = link_devrows(), first, i;
+    int32_t y = 26;
+    cv_begin(240, THROAT_H, C_BG);
+    cv_text_over(6, 4, &FONT_S, "CONNECTIONS", C_TEXT);
+    {
+        const char *c = plat_ble_connected() ? "COMPUTER: BT" : "";
+        cv_text_over(234 - text_w(&FONT_XS, c), 6, &FONT_XS, c, C_KEY);
+    }
+    first = ui.link_row < rows ? (int)ui.link_row - 2 : rows - 3;     /* three device rows at most, the cursor's
+                                                                         * in view */
+    first = first > rows - 3 ? rows - 3 : first;
+    first = first < 0 ? 0 : first;
+    if (btdev_busy()) {
+        t[0] = 0;
+        text_cat(t, upper(btdev_name()));
+        text_cat(t, btdev_ready() ? "  CONNECTED" : "  CONNECTING");
+        t[26] = 0;                                  /* (what fits) */
+        link_row(y, 0, "BT", t, btdev_ready() ? C_KEY : C_DIMT);
+    } else if (!n) {
+        link_row(y, 0, "BT", "LOOKING...", C_DIMT);
+    } else
+        for (i = first; i < first + 3 && i < n; i++, y += 16)
+            if (btdev_found(i, name, 0))
+                link_row(y, i, i == first ? "BT" : 0, upper(name), C_TEXT);
+    y = 26 + 3 * 16;
+    if (u == USBH_OFF)
+        link_row(y, rows, "USB", "DEVICE", C_TEXT);
+    else if (u == USBH_CONNECTED) {
+        const char *dev = upper(plat_usb_host_name());
+        t[0] = 0;
+        text_cat(t, "HOST TO ");
+        text_cat(t, dev[0] ? dev : "A DEVICE");
+        t[24] = 0;
+        link_row(y, rows, "USB", t, C_KEY);
+    } else
+        link_row(y, rows, "USB", "HOST - LOOKING", C_DIMT);
+    {
+        const char *hint = "SELECT MOVE   EDIT BACK";
+        cv_text_over(234 - text_w(&FONT_XS, hint), 98, &FONT_XS, hint, C_DIMT);
+        if (link_action()[0]) {                     /* what SAVE does on the row: "SAVE CONNECT" */
+            char a[24] = "SAVE ";
+            text_cat(a, link_action());
+            cv_text_over(6, 98, &FONT_XS, a, C_LIT);
+        }
+    }
+    cv_blit(0, 0);
+}
+static void link_poll(void)                     /* every frame: the scan, what happened, the page */
+{
+    static int last_usb_row = -1;
+    uint32_t sig, now = plat_ms();
+    int ev;
+    btdev_page(ui.page_link);
+    while ((ev = btdev_event()) != BTDEV_NONE)
+        app_say("BLUETOOTH", btdev_word(ev));
+    switch (plat_usb_host_msg()) {
+    case USBH_MSG_ON: app_say("USB", "HOST"); break;
+    case USBH_MSG_OFF: app_say("USB", "DEVICE"); break;
+    case USBH_MSG_MIDI: app_say("USB HOST TO", plat_usb_host_name()[0] ? upper(plat_usb_host_name()) : "A DEVICE"); break;
+    case USBH_MSG_NOMIDI: app_say("USB", "NOT A MIDI DEVICE"); break;
+    case USBH_MSG_LOW: app_say("USB", "NEEDS POWER"); break;
+    case USBH_MSG_LOST: app_say("USB", "DEVICE LOST"); break;
+    default: break;
+    }
+    if (plat_usb_lost())                        /* a USB session ended: what its notes held lets go */
+        stop((uint32_t)voice[0].note);
+    if (last_usb_row >= 0 && ui.link_row == last_usb_row)   /* on the USB row: it stays there as devices come */
+        ui.link_row = (uint8_t)link_usb_row();
+    if (ui.link_row > link_usb_row())
+        ui.link_row = (uint8_t)link_usb_row();
+    last_usb_row = link_usb_row();
+    if (!ui.page_link)
+        return;
+    sig = (uint32_t)btdev_count() | (uint32_t)btdev_pick() << 4 | (uint32_t)btdev_busy() << 8 |
+          (uint32_t)btdev_ready() << 9 | (uint32_t)plat_ble_connected() << 10 | (uint32_t)plat_usb_host_state() << 11 |
+          (uint32_t)ui.link_row << 14 | 1u << 31;
+    if (sig != ui.link_sig || now - ui.link_ms >= 500u) {   /* (the names found may change: twice a second) */
+        ui.link_sig = sig;
+        ui.link_ms = now;
+        draw_link();
+    }
+}
+
 /* ---- one pass of the main loop: input, the sequencer, the lights, what changed on the screen. The platform
  * calls it every pass (app_input_only) and at its frames (app_frame), as Dinghy's loop ran */
 static void pass(void)
@@ -1079,6 +1319,7 @@ static void pass(void)
                                                   * silent, nothing recorded */
                 ui.held[k] = 255;               /* nothing to stop on release */
                 ui.sel_pending = 0;             /* SEL used as a modifier: no rest */
+                ui.save_pending = 0;            /* SAVE too: no enter on the connections page */
                 if (n >= 0 && (btn & (1u << B_SAVE))) {
                     uint32_t j;
                     for (j = 0; j < NSTEP; j++) set.bank[n].step[j] = set.step[j];
@@ -1166,9 +1407,23 @@ static void pass(void)
         touched_id = 12; touched_val = ui.rec_step;
     }
     ui.sel_pending &= ~rel;
+    if (b & (1u << B_EDIT)) {                   /* the connections page, or back to the throat */
+        ui.page_link = !ui.page_link;
+        ui.link_sig = 0;
+        if (!ui.page_link) {                    /* the throat again, whole */
+            ui.thr_x = ui.thr_y = -100;
+            ui.note_drawn = ~0u;
+            ui.thr_row = THROAT_H;
+        }
+    }
+    ui.save_pending |= b & (1u << B_SAVE);      /* SAVE tapped on the page: the row's action (on release: held
+                                                  * through a key it stores a pattern instead) */
+    if (ui.page_link && (rel & ui.save_pending))
+        link_enter();
+    ui.save_pending &= ~rel;
     if (b & (1u << B_REC)) {                    /* toggle record mode: stop playback, reset the cursor */
         ui.rec_mode = !ui.rec_mode;
-        if (ui.rec_mode) { ui.seq_running = 0; ui.rec_step = 0; stop((uint32_t)voice[0].note); seq_halt(); }
+        if (ui.rec_mode) { seq_stop(now); ui.rec_step = 0; stop((uint32_t)voice[0].note); }
     }
     if (b & (1u << B_PLAY) && (btn & (1u << B_ARP))) {   /* ARP + PLAY: a random pattern, playing on as it
                                                   * was -- heard from the next step */
@@ -1176,9 +1431,8 @@ static void pass(void)
         ui.dirty = 1; ui.t_change = now;
         touched_id = 17; touched_val = (int32_t)++ui.randoms;
     } else if (b & (1u << B_PLAY) && !ui.rec_mode) {   /* toggle the sequencer; can't run while recording */
-        ui.seq_running = !ui.seq_running;
-        if (ui.seq_running) { ui.seq_step = 0; ui.seq_next_ms = now; }
-        else seq_halt();
+        if (ui.seq_running) seq_stop(now);
+        else seq_start(now);
     }
 
     {                                            /* 7 knobs, no menus (see the comment above knob()) */
@@ -1214,7 +1468,12 @@ static void pass(void)
         knob(&par.x, plat_enc(EN_ALGO), 20, 0, 1000, 4);
         d = plat_enc(EN_SELECT);                 /* Y normally; steps while recording; tempo under SEQ; the
                                                    * randomizer's scale under ARP */
-        if (d) {
+        if (d && ui.page_link) {                /* the connections page: its cursor */
+            int row = (int)ui.link_row + (d > 0 ? 1 : -1), last = link_usb_row();
+            ui.link_row = (uint8_t)(row < 0 ? 0 : row > last ? last : row);
+            if (ui.link_row < link_usb_row() && !btdev_busy() && btdev_count())
+                btdev_choose(ui.link_row);
+        } else if (d) {
             if (btn & (1u << B_ARP)) {
                 int32_t sc = (int32_t)set.scale + (d > 0 ? 1 : -1);
                 set.scale = (uint8_t)(sc < 0 ? 0 : sc >= (int32_t)NSCALE ? (int32_t)NSCALE - 1 : sc);
@@ -1250,48 +1509,51 @@ static void pass(void)
         }
     }
 
-    while (plat_midi_in(&pkt, 0)) {             /* MIDI in (USB, TRS), any channel */
-        uint32_t st = (pkt >> 8) & 0xFFu, d1 = (pkt >> 16) & 0x7Fu, d2 = (pkt >> 24) & 0x7Fu;
-        if ((st & 0xF0u) == 0x90u && d2) play(d1, d2);
-        else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) stop(d1);
-        else if (st == 0xF8u) {                 /* MIDI clock, 24 per quarter note: 6 ticks = one 16th */
-            ui.midiclk_last_ms = now;
-            ui.seq_next_ms = now + (uint32_t)(15000 / set.bpm);   /* keep the fallback timer from firing a
-                                                                   * catch-up burst if the external clock
-                                                                   * later drops out */
-            if (ui.seq_running && !ui.rec_mode && ++ui.midiclk_count >= 6u) {
-                ui.midiclk_count = 0;
-                if (ui.seq_step == 0 && ui.load_next >= 0) {   /* a queued pattern comes in on step 1 */
-                    slot_apply(set.step, &set.root, &set.scale, &set.bank[ui.load_next]);
-                    set.slot = (uint8_t)ui.load_next; ui.dirty = 1; ui.t_change = now;
-                    touched_id = 22; touched_val = ui.load_next + 1; ui.load_next = -1;
-                }
-                seq_trigger(&set.step[ui.seq_step]);
-                ui.seq_step = (ui.seq_step + 1) % (int32_t)NSTEP;
-            } else if (ui.seq_running && !ui.rec_mode && ui.midiclk_count == 3u) {
-                seq_release();                  /* half a 16th: the note lets go unless it ties */
+    {
+        int port;
+        uint32_t t24 = now24();
+        while (plat_midi_in(&pkt, &port)) {     /* MIDI in (USB, TRS, Bluetooth), any channel */
+            uint32_t st = (pkt >> 8) & 0xFFu, d1 = (pkt >> 16) & 0x7Fu, d2 = (pkt >> 24) & 0x7Fu;
+            if ((st & 0xF0u) == 0x90u && d2) play(d1, d2);
+            else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) stop(d1);
+            else if (st == 0xF8u) {             /* a pulse: due now, Bluetooth's at its sender's time + BLE_LATE */
+#ifdef PLAT_HOST
+                uint32_t due = port == PORT_BLE ? t24 + BLE_LATE : t24;
+#else
+                uint32_t due = port == PORT_BLE ? plat_midi_in_t24() + BLE_LATE : t24;
+#endif
+                ui.ext_ms = now;
+                if (ui.extq_w - ui.extq_r < 32u)
+                    ui.extq[ui.extq_w++ % 32u] = due;
+                else
+                    on_pulse();
+            } else if (st == 0xFAu) {           /* Start: the first pulse after it plays step 1 */
+                ui.ext_ms = now;
+                ui.extq_r = ui.extq_w;
+                if (ui.seq_running && !ui.rec_mode) seq_halt();
+                ui.seq_running = !ui.rec_mode;
+                ui.seq_step = 0;
+                ui.clk_first = 1;
+            } else if (st == 0xFBu) {           /* Continue */
+                ui.ext_ms = now;
+                ui.seq_running = !ui.rec_mode;
+            } else if (st == 0xFCu) {           /* Stop */
+                ui.extq_r = ui.extq_w;
+                ui.seq_running = 0;
+                seq_halt();
             }
-        } else if (st == 0xFAu) { ui.seq_running = 1; ui.seq_step = 0; ui.midiclk_count = 0; }   /* start */
-        else if (st == 0xFBu) { ui.seq_running = 1; }                                          /* continue */
-        else if (st == 0xFCu) { ui.seq_running = 0; seq_halt(); }                               /* stop */
-    }
-
-    /* one sequencer step at the internal tempo -- only when no external MIDI clock has ticked in the last
-     * 500 ms; while a DAW/clock is actively sending 0xF8, that drives stepping instead (above), so the two never
-     * double-trigger */
-    if (ui.seq_running && !ui.rec_mode && now - ui.midiclk_last_ms > 500u && now >= ui.seq_next_ms) {
-        ui.seq_next_ms += (uint32_t)(15000 / set.bpm);   /* 60000 / bpm / 4; no drift: += not = */
-        ui.seq_off_ms = now + (uint32_t)(7500 / set.bpm);   /* half a step */
-        if (ui.seq_step == 0 && ui.load_next >= 0) {      /* a queued pattern comes in on step 1 */
-            slot_apply(set.step, &set.root, &set.scale, &set.bank[ui.load_next]);
-            set.slot = (uint8_t)ui.load_next; ui.dirty = 1; ui.t_change = now;
-            touched_id = 22; touched_val = ui.load_next + 1; ui.load_next = -1;
         }
-        seq_trigger(&set.step[ui.seq_step]);
-        ui.seq_step = (ui.seq_step + 1) % (int32_t)NSTEP;
+        while (ui.extq_r != ui.extq_w && (int32_t)(t24 - ui.extq[ui.extq_r % 32u]) >= 0) {
+            ui.extq_r++;
+            on_pulse();
+        }
+        clk_bpm = (uint16_t)set.bpm;            /* the internal clock: its pulses, when no outside one comes */
+        clk_run_int = (uint8_t)(ui.seq_running && !ui.rec_mode && !ext_clock(now));
+        while (ui.pulses_seen != clk_pulses) {
+            ui.pulses_seen++;
+            on_pulse();
+        }
     }
-    if (ui.seq_running && now - ui.midiclk_last_ms > 500u && (int32_t)(now - ui.seq_off_ms) >= 0)
-        seq_release();                           /* internal clock: the note lets go unless it ties */
 
     /* the lights, in three levels: lit, the middle tier (plat_lights_mid) and the glow */
     base = (uint32_t)(KEY0 + 12 * set.oct);
@@ -1335,7 +1597,7 @@ static void pass(void)
     else if (!ui.seq_running) vow_lock = 0;
 
     if (lit != ui.lit_drawn) { ui.lit_drawn = lit; draw_keys(lit); }   /* redraw only what changed */
-    {                                            /* the throat: redrawn when the vowel (with the LFOs) or the
+    if (!ui.page_link) {                         /* the throat: redrawn when the vowel (with the LFOs) or the
                                                    * note changes, at most ~20 times a second, in 16-row chunks,
                                                    * each started only once the LCD has sent the last one -- so
                                                    * the main loop (and the sequencer in it) never waits for the
@@ -1416,6 +1678,7 @@ void app_input_only(void) { pass(); }
 void app_frame(void)
 {
     pass();
+    link_poll();
     speak();
 }
 
@@ -1431,6 +1694,7 @@ int app_expect(const char *what, int *got)
     else if (!strcmp(what, "dirty")) *got = (int)ui.dirty;
     else if (!strcmp(what, "bpm")) *got = set.bpm;
     else if (!strcmp(what, "used")) *got = set.used;
+    else if (!strcmp(what, "page")) *got = ui.page_link;
     else return 0;
     return 1;
 }

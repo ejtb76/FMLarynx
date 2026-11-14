@@ -1,0 +1,47 @@
+# The connections page (EDIT), in the throat's place: the Bluetooth MIDI devices found, then the USB port. SELECT
+# moves the cursor, SAVE enters (connect / let go; USB to HOST / back to DEVICE); the clock goes out to all.
+#   sh build.sh --host && app/build/host/fmlarynx_host app/tests/link.txt build/link
+wait 1500
+tap EDIT
+expect page 1
+wait 2500
+shot 01-page-looking.png
+tap SAVE
+wait 2000
+shot 02-bt-connect.png
+expect ble_dev 4
+tap SAVE
+wait 500
+turn SELECT 3
+wait 200
+shot 03-usb-row.png
+tap SAVE
+wait 300
+shot 04-usb-host-looking.png
+usbh plug AMENITY
+wait 600
+shot 05-usb-host-to.png
+tap EDIT
+expect page 0
+wait 200
+shot 06-throat-again.png
+# PLAY: our clock out, to the FM-1 hosted (Start, then 24 a beat: 120 BPM: the tap (80 ms) and 2 s = 100 pulses)
+tap PLAY
+wait 2000
+expect usbh_clocks >98
+expect usbh_clocks <102
+# its clock in: we follow it (no pulses of our own meanwhile)
+tap PLAY
+expect playing 0
+usbh midi FA 00 00
+usbh clock 12
+expect playing 1
+expect step 2
+usbh midi FC 00 00
+expect playing 0
+tap EDIT
+turn SELECT 3
+tap SAVE
+wait 400
+shot 07-usb-device.png
+tap EDIT

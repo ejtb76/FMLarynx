@@ -4,3 +4,11 @@
 FMLARYNX	f m larynx
 RES	resonance
 ENV MOD	envelope mod
+CONNECTIONS	connections
+SAVE CONNECT	save connects
+SAVE LET GO	save lets go
+SAVE HOST	save makes the USB port a host
+SAVE DEVICE	save makes the USB port a device
+SELECT MOVE	select moves
+EDIT BACK	edit goes back
+BT	bluetooth

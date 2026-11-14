@@ -5,6 +5,12 @@ id_prefix = "FM-1_984"         # package identity: dev FM-1_98400, releases FM-1
 usb_manufacturer = "FMLARYNX"
 usb_product = "FMLARYNX FM-1"
 o2 = []
+words = "words.tsv"
+ble = true                     # Bluetooth MIDI
+ble_stack = "own"              # fm1-base's own stack: nothing of JieLi's linked (the licence stays GPL-3.0)
+ble_central = true             # and to Bluetooth MIDI devices (another FM-1): the connections page (EDIT)
+ble_midi_time = true           # Bluetooth MIDI by the sender's time: a clock over Bluetooth without its bunching
+usb_host = true                # the USB port hosts a MIDI device (another FM-1) when asked: the connections page
 # the site (tools/make_site.py)
 tagline = "A talking formant synth for the FM-1"
 repo = "https://github.com/ejtb76/FMLarynx"

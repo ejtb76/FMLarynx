@@ -184,12 +184,21 @@ in flash and come back after power-off. They are saved two seconds after your la
 sounding, because writing to flash briefly interrupts the sound. Stop the sequencer for a moment before you switch
 off, so your last changes are saved.
 
-## MIDI and audio over USB
+## MIDI, Bluetooth and audio
 
-- **MIDI in:** notes on any channel play the voice, with velocity. MIDI clock drives the sequencer.
-- **MIDI out:** notes from the keys and from the sequencer.
-- **Audio:** the FM-1 shows up as a 16-bit stereo audio input (44.1 or 48 kHz), so you can record it straight into
-  a DAW.
+- **MIDI in** (USB, the TRS jack, Bluetooth): notes on any channel play the voice, with velocity. MIDI clock drives
+  the sequencer: **Start** arms it, the first clock after it plays step 1, a step every six clocks. **Stop** stops
+  it. When no clock has come for half a second, it plays on at its own tempo.
+- **MIDI out** (USB and Bluetooth): notes from the keys and the sequencer, and, while the sequencer runs on its own
+  tempo, MIDI clock with Start and Stop, so a DAW or a second FM-1 (Amenity, say) follows FMLarynx.
+- **Your DAW sees a new device name:** "FMLARYNX FM-1". Turn its clock output on again for it (FL Studio: Options,
+  MIDI settings, the output port, "Send master sync").
+- **Connections (EDIT):** the throat makes way for a list: the Bluetooth MIDI devices around (FMLarynx connects to
+  one, another FM-1 for instance), then the USB port, which can be a **device** (to a computer) or a **host** to a
+  USB MIDI device such as another FM-1. **SELECT** moves the cursor, **SAVE** does what the bottom line says
+  (CONNECT, LET GO, HOST, DEVICE), **EDIT** goes back. A computer, phone or tablet can also connect to FMLarynx over
+  Bluetooth MIDI on its own.
+- **Audio:** the FM-1 shows up as a 16-bit stereo audio input at 44.1 kHz, so you can record it straight into a DAW.
 
 ## Installing
 

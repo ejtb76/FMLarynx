@@ -1,0 +1,40 @@
+# The clock: ours out over USB at the tempo (PLAY: Start and 24 a beat, Stop), an outside one followed (USB and
+# Bluetooth: Start arms, the first pulse plays step 1, a step every 6 pulses), the internal one again when it stops.
+master 4096
+wait 200
+tap ARP
+key 7 down
+key 7 up
+expect bpm 120
+# 120 BPM: the tap (80 ms) and 2 s are 100 pulses
+tap PLAY
+wait 2000
+expect clocks_out >98
+expect clocks_out <102
+tap PLAY
+expect playing 0
+# a computer's clock over USB
+midi FA 00 00
+clock 13
+expect playing 1
+expect step 3
+midi FC 00 00
+expect playing 0
+expect note -1
+# over Bluetooth: taken 20 ms after the sender's time
+ble connect
+wait 1200
+midi BLE FA 00 00
+midi BLE F8 00 00
+wait 10
+expect step 0
+wait 15
+expect step 1
+midi BLE FC 00 00
+# the outside clock stops without a Stop: after 500 ms the internal one plays on
+midi FA 00 00
+clock 7
+expect step 2
+wait 1200
+expect step >5
+tap PLAY
