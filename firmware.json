@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "fmlarynx",
-  "name": "FMLARYNX",
+  "name": "FMLarynx",
   "author": "Presethead",
   "license": "GPL-3.0-only",
   "tagline": "A talking formant synth for the FM-1",

@@ -1,5 +1,6 @@
 # FMLarynx's build settings (fm1-base's tools/build.py, through ./build.sh)
 name = "FMLARYNX"              # APP_NAME is in app.h; this names the build's files: fmlarynx.fwsc, fmlarynx-X.Y.fwsc
+title = "FMLarynx"             # the name people know it by, for firmware.json (the USB name stays FMLARYNX)
 id_prefix = "FM-1_984"         # package identity: dev FM-1_98400, releases FM-1_984XXYYZZ. The hub lists FMLarynx
                                # as FM-1_984: agree the wider pattern with the hub before releasing
 usb_manufacturer = "FMLARYNX"
