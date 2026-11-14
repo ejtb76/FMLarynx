@@ -8,11 +8,13 @@
  *   keys       play the voice; the notes go out over USB-MIDI too
  *   OCT- OCT+  the octave (kept in flash)
  *   MASTER     the volume (the platform's: the render's master_q12)
- *   MIDI in    notes play the voice, with their velocity; clock, start, stop drive the sequencer
+ *   MIDI in    notes play the voice, with their velocity; clock, start, stop drive the sequencer (followed as
+ *              Amenity follows: larynx_clock.c); everything that comes in goes on to the other outs (THRU)
  *
  * The sound is integer arithmetic, as it was on Dinghy; its 64-bit multiplies go through noinline helpers (the
  * CPU's erratum, felucca-bsp docs/CPU.md). */
 #include "larynx_mul.h"
+#include "larynx_clock.h"                 /* MIDI clock in: the delay-locked loop, as Amenity's */
 #include "btdev.h"                        /* Bluetooth MIDI devices: the connections page (EDIT) */
 
 /* ---- the sound (runs in the audio ISR: keep it short, no flash, no screen)
@@ -214,7 +216,10 @@ static int32_t decay_coef(int32_t pm)           /* pm 0..1000 -> the factor, int
     return decay_q15[i] + (decay_q15[i + 1] - decay_q15[i]) * f / 50;
 }
 
-static void formant_update_coeffs(int32_t cb0[NBAND], int32_t cb2[NBAND], int32_t ca1[NBAND], int32_t ca2[NBAND])
+/* ctl: a 256-frame block's end falls in this render (app_audio's ctl_frames): the LFOs, the decays and the smoothing
+ * step on then only, so a block rendered in pieces (a step's note on its own sample) moves at the same pace */
+static void formant_update_coeffs(int32_t cb0[NBAND], int32_t cb2[NBAND], int32_t ca1[NBAND], int32_t ca2[NBAND],
+                                  int ctl)
 {
     int32_t lfoX = (sine(lfoXPh) * par.lfoXDepth) / 32767;    /* -depth..depth, pm */
     int32_t lfoY = (sine(lfoYPh) * par.lfoYDepth) / 32767;
@@ -225,15 +230,19 @@ static void formant_update_coeffs(int32_t cb0[NBAND], int32_t cb2[NBAND], int32_
     uint32_t b;
     x = x < 0 ? 0 : x > 1000 ? 1000 : x;
     y = y < 0 ? 0 : y > 1000 ? 1000 : y;
-    lfoXPh += par.lfoXRate * 199458u;           /* rate pm -> phase step per block, 0..8 Hz */
-    lfoYPh += par.lfoYRate * 199458u;
+    if (ctl) {
+        lfoXPh += par.lfoXRate * 199458u;       /* rate pm -> phase step per block, 0..8 Hz */
+        lfoYPh += par.lfoYRate * 199458u;
+    }
 
     x += ((vowel_x[2] - x) * acc) >> 16;        /* accent: halfway to "a" at full (>> 16 = * acc/2) */
     y += ((vowel_y[2] - y) * acc) >> 16;
     res_eff = par.resx10 + ((par.resx10 * acc) >> 15);        /* accent: up to 2x Q */
     if (res_eff > 500) res_eff = 500;
-    accent_env = (accent_env * 31830) >> 15;    /* decay per 5.8 ms block: e^(-5.8/200) -> ~200 ms */
-    mod_env = (mod_env * decay_coef(par.decay)) >> 15;
+    if (ctl) {
+        accent_env = (accent_env * 31830) >> 15;   /* decay per 5.8 ms block: e^(-5.8/200) -> ~200 ms */
+        mod_env = (mod_env * decay_coef(par.decay)) >> 15;
+    }
 
     vowel_freqs(x, y, par.voice, target);
     for (b = 0; b < NBAND; b++) {
@@ -241,7 +250,7 @@ static void formant_update_coeffs(int32_t cb0[NBAND], int32_t cb2[NBAND], int32_
         uint32_t ph0;
         if (f < 20) f = 20; else if (f > 19845) f = 19845;    /* Nyquist guard, 0.45 * 44100 */
         if (mFreq[b] < 0) mFreq[b] = f;                        /* snap on the very first block */
-        else mFreq[b] += ((f - mFreq[b]) * 8260) >> 15;        /* one-pole smooth, ~20 ms (kSmoothMs) */
+        else if (ctl) mFreq[b] += ((f - mFreq[b]) * 8260) >> 15;   /* one-pole smooth, ~20 ms (kSmoothMs) */
         fc = mFreq[b];
 
         turns_q16 = (fc << 16) / 44100;                        /* fc/fs as a Q16 fraction of a turn;
@@ -294,10 +303,15 @@ static int32_t formant(int32_t x, const int32_t cb0[NBAND], const int32_t cb2[NB
 }
 
 static uint32_t quiet_blocks;                   /* blocks since the voice went silent */
+static uint32_t ctl_frames;                     /* frames rendered since the last 256-frame block's end */
 
+/* n frames: a whole APP_BLOCK, or a piece of one (app_render splits a block where a sequencer pulse falls). The
+ * coefficients follow at each piece; what steps once per block (the decays, the LFOs, the smoothing, quiet_blocks)
+ * steps in the piece that ends the block, so one piece or several sound the same. */
 static void app_audio(int32_t *out, uint32_t n)
 {
     uint32_t i;
+    int ctl;
     uint32_t ph = voice[0].ph, step = voice[0].inc, tgt = voice[0].tgt;
     int32_t amp = voice[0].amp, g = voice[0].gate;
     int32_t cb0[NBAND], cb2[NBAND], ca1[NBAND], ca2[NBAND];
@@ -306,7 +320,10 @@ static void app_audio(int32_t *out, uint32_t n)
     static int32_t sv_low, sv_band;             /* the Cutoff filter's state */
     static int32_t sv_f_last = 16384, sv_q_last = 23170, sv_w_last;   /* last block's f, q (Q14), wet (Q15) */
     int32_t sv_f, sv_f_step, sv_q, sv_q_step, sv_w, sv_w_step, sv_comp;
-    if (!amp && !g) {                           /* released and faded out -- but the resonant filter
+    ctl_frames += n;
+    ctl = ctl_frames >= APP_BLOCK;
+    if (ctl) ctl_frames -= APP_BLOCK;
+    if (!amp && !g) {                          /* released and faded out -- but the resonant filter
                                                    * may still ring: run on until it has died away, or
                                                    * freezing it mid-ring would cut the sound off with a
                                                    * click, and the next note would restart that frozen
@@ -318,7 +335,8 @@ static void app_audio(int32_t *out, uint32_t n)
             if (y1 > 2 || y2 > 2) ring = 1;
         }
         if (sv_low > 2 || sv_low < -2 || sv_band > 2 || sv_band < -2) ring = 1;
-        if (++quiet_blocks > 40u) ring = 0;     /* ~230 ms on: whatever is left is a fixed-point residue,
+        if (ctl) ++quiet_blocks;
+        if (quiet_blocks > 40u) ring = 0;    /* ~230 ms on: whatever is left is a fixed-point residue,
                                                   * not a ring (even Q 50 has died away by then) */
         if (!ring) {                            /* silent: costs nothing; start the next note from rest */
             for (b = 0; b < NBAND; b++) fz1x[b] = fz2x[b] = fz1y[b] = fz2y[b] = 0;
@@ -330,11 +348,11 @@ static void app_audio(int32_t *out, uint32_t n)
     ae = amp_env;                                /* Amp Decay: a ramp across the block from where it
                                                    * was, so a restart fades up instead of jumping */
     if (env_trig) { env_trig = 0; mod_env = 32767; amp_env = 32767; }   /* a new note: restart */
-    if (par.ampdec < 1000) amp_env = (amp_env * decay_coef(par.ampdec)) >> 15;
-    if (quiet_blocks > 24u) amp_env >>= 1;      /* silent a while: fade out what still rings, so the
+    if (ctl && par.ampdec < 1000) amp_env = (amp_env * decay_coef(par.ampdec)) >> 15;
+    if (ctl && quiet_blocks > 24u) amp_env >>= 1;     /* silent a while: fade out what still rings, so the
                                                   * reset at 40 blocks has nothing left to cut off */
     ae_step = (amp_env - ae) / (int32_t)n;
-    formant_update_coeffs(cb0, cb2, ca1, ca2);   /* control rate: once per 256-frame block */
+    formant_update_coeffs(cb0, cb2, ca1, ca2, ctl);   /* control rate: once per block (or piece) */
     resGain = res_gain_q8[res_eff / 10];         /* resonance volume compensation, see the table above */
     rg = rg_last << 8;                           /* ramped across the block too (Q16): an accent's Q
                                                    * jump would otherwise step the output gain at once */
@@ -418,6 +436,28 @@ static void midi_send(uint32_t st, uint32_t d1, uint32_t d2)   /* a channel mess
     plat_midi_send((st >> 4) | st << 8 | (d1 & 0x7Fu) << 16 | (d2 & 0x7Fu) << 24, MIDI_TO);
 }
 
+/* What the audio interrupt sends (the clock, the sequencer's notes) goes with the time it is heard, as Amenity's
+ * clock out: the tick sends each then, so another FM-1 or a DAW gets it with the sound, not a block early. */
+enum { OUTQ = 64 };
+static struct { uint32_t at, pkt; } outq[OUTQ];
+static volatile uint32_t outq_w, outq_r;
+static uint32_t seq_at;                         /* audio interrupt: when the pulse being played is heard */
+static void out_at(uint32_t pkt, uint32_t at)   /* audio interrupt */
+{
+    uint32_t w = outq_w;
+    if (w - outq_r >= OUTQ)
+        return;
+    outq[w % OUTQ].at = at;
+    outq[w % OUTQ].pkt = pkt;
+    __asm__ volatile("" ::: "memory");
+    outq_w = w + 1u;
+}
+static void seq_send(uint32_t st, uint32_t d1, uint32_t d2)   /* a sequencer's note, at its pulse */
+{
+    out_at((st >> 4) | st << 8 | (d1 & 0x7Fu) << 16 | (d2 & 0x7Fu) << 24, seq_at);
+}
+static void clock_out(uint32_t status, uint32_t at) { out_at(0x0Fu | status << 8, at); }   /* CIN F: one byte */
+
 /* ---- notes (main loop) */
 static const uint32_t INC_C9[12] = {            /* MIDI 120..131 (C9..B9); lower octaves shift right */
     815363807u, 863847862u, 915214929u, 969636441u, 1027294024u, 1088380105u,
@@ -450,6 +490,34 @@ static void stop(uint32_t note)
         if (voice[v].note == note)
             voice[v].gate = 0;
 }
+/* The voice is the audio interrupt's alone: it plays the sequencer's steps there (on their sample), and takes the
+ * keys' notes (main loop) and MIDI's (the tick) from these queues at each block. vel 0: let go; note ALL_OFF: let go
+ * of whatever sounds. One queue per writer, so each has one writer and one reader. */
+#define ALL_OFF 255u
+struct noteq { volatile uint16_t ev[32]; volatile uint32_t w, r; };
+static struct noteq keyq, midiq;
+static void noteq_put(struct noteq *q, uint32_t note, uint32_t vel)
+{
+    uint32_t w = q->w;
+    if (w - q->r >= 32u)
+        return;
+    q->ev[w % 32u] = (uint16_t)(note | vel << 8);
+    __asm__ volatile("" ::: "memory");
+    q->w = w + 1u;
+}
+static void noteq_take(struct noteq *q)         /* audio interrupt */
+{
+    while (q->r != q->w) {
+        uint32_t e = q->ev[q->r % 32u], note = e & 0xFFu, vel = e >> 8;
+        if (note == ALL_OFF) stop((uint32_t)voice[0].note);
+        else if (vel) play(note, vel);
+        else stop(note);
+        q->r++;
+    }
+}
+static void key_on(uint32_t note, uint32_t vel) { noteq_put(&keyq, note, vel); }   /* main loop */
+static void key_off(uint32_t note) { noteq_put(&keyq, note, 0); }
+
 static int quiet(void)                          /* nothing sounds, not even a release */
 {
     uint32_t v;
@@ -673,7 +741,7 @@ static void seq_release(void)                   /* half a step after a note, unl
     if (seq_note < 128u && !seq_tie) {
         stop(seq_note);                         /* stop() only touches the voice if it still plays
                                                   * seq_note, so a key played live meanwhile stays */
-        midi_send(0x80, seq_note, 0);
+        seq_send(0x80, seq_note, 0);
         seq_note = 255;
     }
 }
@@ -703,11 +771,11 @@ static void seq_trigger(const struct seq_step_s *s)   /* shared by the internal 
         play(note, vel);
         glide_next = 0;
         if (prev != note) {
-            midi_send(0x90, note, vel);
-            if (prev < 128u) midi_send(0x80, prev, 0);  /* after the new note-on: legato */
+            seq_send(0x90, note, vel);
+            if (prev < 128u) seq_send(0x80, prev, 0);  /* after the new note-on: legato */
         } else if (!slide) {
-            midi_send(0x80, prev, 0);                    /* same note again, retriggered */
-            midi_send(0x90, note, vel);
+            seq_send(0x80, prev, 0);                    /* same note again, retriggered */
+            seq_send(0x90, note, vel);
         }                                                /* same note tied: it just goes on */
         seq_note = note;
         vow_lock = (int32_t)STEP_VOW(s->flags);        /* the step's vowel, or back to the knobs */
@@ -955,7 +1023,6 @@ static struct {
     uint32_t tap_pending;                       /* GLO/ENV pressed, not yet used as a modifier */
     uint32_t randoms;                           /* ARP + PLAY presses, shown as RANDOM n */
     uint32_t sel_pending;                       /* SEL pressed, not yet used to load: a rest on release */
-    int32_t load_next;                          /* a stored pattern queued for the next step 1 */
     int32_t thr_x, thr_y;                       /* the throat as last drawn .. */
     uint32_t thr_ms, thr_row;                   /* .. when, and the next row of a frame being drawn */
     int32_t thr_sway;                           /* .. and the uvula's sway in it */
@@ -963,12 +1030,8 @@ static struct {
     int32_t oct_drawn, mark_drawn;
     uint8_t flags_drawn[NSTEP];                 /* what draw_steps() last showed; mark_drawn -2 forces the
                                                   * first draw */
-    int32_t rec_mode, rec_step, seq_running, seq_step;
-    uint32_t clk_count;                         /* pulses since the last step (6 a step; 3: the note lets go) */
-    uint32_t clk_first;                         /* started: the next pulse plays step 1 */
-    uint32_t ext_ms;                            /* the last clock, Start or Continue from outside */
-    uint32_t pulses_seen;                       /* the internal clock's pulses taken (clk_pulses) */
-    uint32_t extq[32], extq_r, extq_w;          /* outside pulses, each when it is due (plat_ticks24's clock) */
+    volatile int32_t rec_mode;                  /* (the audio interrupt reads it: no steps while recording) */
+    int32_t rec_step;
     uint8_t page_link;                          /* the connections page is up (EDIT) */
     uint8_t link_row;                           /* its cursor (SELECT moves it, SAVE enters) */
     uint32_t link_sig, link_ms;                 /* what it showed, and when */
@@ -980,7 +1043,7 @@ static struct {
     char say[32];                               /* app_say's message on the bottom text line, until say_until */
     uint32_t say_until;
     uint8_t say_new, say_shown, bottom_drawn;
-} ui = {.load_next = -1, .ext_ms = 0u - 1000u};   /* "ages ago": starts on the internal clock */
+} ui;
 
 void app_init(void)
 {
@@ -1045,64 +1108,35 @@ static void speak(void)                         /* a screen reader that starts l
     ann_tick(plat_ms());
 }
 
-#ifndef PLAT_HOST
-static volatile uint32_t dbg_us_now, dbg_us_max;   /* the render's time, now and worst since boot */
-#endif
-void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
-{
-    uint32_t i;
-#ifndef PLAT_HOST
-    uint32_t t0 = plat_ticks24();
-#endif
-    for (i = 0; i < 2u * n; i++)
-        lr[i] = 0;
-    app_audio(lr, n);                           /* Q15, as on Dinghy */
-    for (i = 0; i < 2u * n; i++) {               /* MASTER, then Q15 -> 24 bit with Dinghy's -6 dBFS ceiling */
-        int32_t v = (lr[i] * (int32_t)master_q12) >> 12;
-        lr[i] = (v > 32767 ? 32767 : v < -32767 ? -32767 : v) << 7;
-    }
-#ifndef PLAT_HOST
-    dbg_us_now = (plat_ticks24() - t0) / 24u;
-    if (dbg_us_now > dbg_us_max) dbg_us_max = dbg_us_now;
-#endif
-}
+/* ---- the clock, as Amenity's: 24 pulses a quarter note, a step every 6, its note let go at 3 (unless it ties).
+ * The sequencer runs in the audio interrupt, each pulse on its own sample (app_render renders up to it, plays it,
+ * renders on), at the time it is heard: a block is heard HEARD_TICKS after it is rendered.
+ *   Ours: counted in frames at the tempo; it sends Start, the pulses and Stop to USB and Bluetooth, each at the
+ *         time it is heard (out_at, sent by the tick), so another FM-1 follows the sound, not the render.
+ *   From outside (MIDI clock over USB, TRS or Bluetooth): the tick reads each pulse with the time it came in
+ *         (plat_midi_in_t24: Bluetooth's at its sender's time) and larynx_clock.c's delay-locked loop turns those
+ *         times into a smooth time line; the pulses are played on that line, never at the moment one is read, so
+ *         USB's frames, a DAW's buffers, Bluetooth's bunching and the screen's drawing do not reach the steps. A
+ *         Start arms, the first pulse after it plays step 1; Continue goes on where it was; Stop stops; half a
+ *         second without pulses: ours plays on. More than LOCK_FAR pulses behind the line (a held-up interrupt), the
+ *         steps in between are skipped, not played at once. */
+#define HEARD_TICKS ((uint32_t)((uint64_t)APP_BLOCK * PLAT_TICKS_PER_US * 1000000u / 44100u))
+#define TICKS_PER_FRAME ((float)LARYNX_TICK_HZ / 44100.0f)
+#define INT_PULSE 2646000u                      /* ours: a pulse is 44100 x 60 (frames x BPM x 24) */
+enum { LOCK_FAR = 6, MAX_PULSES = 48 };         /* (MAX_PULSES: a block plays at most these) */
+enum { SQ_NONE, SQ_START, SQ_STOP };
 
-/* ---- the clock: 24 pulses a quarter note, a step every 6, its note let go at 3 (unless it ties). The pulses come
- * from outside (MIDI clock over USB, TRS or Bluetooth; a Start arms, the first pulse after it plays step 1) or, when
- * no outside clock has come for 500 ms, from the internal clock: the 1 kHz tick makes them at the tempo and sends
- * them out (with Start and Stop) to USB and Bluetooth, so another FM-1 follows. Bluetooth's pulses are taken at the
- * sender's time (ble_midi_time) plus BLE_LATE, which takes out the connection's bunching; USB's and TRS's at once. */
-#define BLE_LATE (20u * 24000u)                 /* 20 ms, on plat_ticks24's clock */
-#define CLK_TO (TO_USB | TO_BLE)
-static volatile uint8_t clk_run_int;            /* main loop: the sequencer runs on the internal clock */
-static volatile uint8_t clk_start_req, clk_stop_req;   /* main loop asks the tick: Start (and the first pulse), Stop */
-static volatile uint16_t clk_bpm = 120;
-static volatile uint32_t clk_pulses;            /* tick: the internal pulses made */
-static uint32_t clk_acc;                        /* tick: bpm x microseconds into the pulse (2,500,000 a pulse) */
+static volatile int32_t sq_running, sq_step;   /* audio interrupt; the main loop shows them */
+static volatile int32_t sq_load_next = -1;      /* main loop: a stored pattern queued for the next step 1 .. */
+static volatile int32_t sq_loaded;              /* .. audio interrupt: it came in (its number + 1), for the screen */
+static volatile uint8_t sq_req;                 /* main loop asks the audio interrupt: PLAY's Start or Stop */
+static volatile uint8_t clock_ext;              /* tick: an outside clock is followed (larynx_clock) */
+static uint32_t clk_count, clk_first;           /* audio interrupt: pulses since the last step; the next plays step 1 */
+static uint32_t int_acc;                        /* ours: frames x BPM x 24 into the pulse */
+static uint32_t ext_k;                          /* outside: the next pulse to play, counted from the Start's first */
+static uint8_t int_run, seen_start, was_state;  /* ours runs (and sends); the last Start seen; the loop's last state */
 
-void app_tick(void)                             /* 1 kHz, in the timer interrupt */
-{
-    if (clk_stop_req) {
-        clk_stop_req = 0;
-        plat_midi_send(0x0Fu | 0xFCu << 8, CLK_TO);
-    }
-    if (clk_start_req) {                        /* Start, and the first pulse with it: step 1 */
-        clk_start_req = 0;
-        clk_acc = 0;
-        plat_midi_send(0x0Fu | 0xFAu << 8, CLK_TO);
-        plat_midi_send(0x0Fu | 0xF8u << 8, CLK_TO);
-        clk_pulses++;
-        return;
-    }
-    if (!clk_run_int)
-        return;
-    clk_acc += 1000u * clk_bpm;
-    if (clk_acc >= 2500000u) {
-        clk_acc -= 2500000u;
-        plat_midi_send(0x0Fu | 0xF8u << 8, CLK_TO);
-        clk_pulses++;
-    }
-}
+unsigned larynx_tempo_x10(void) { return (unsigned)set.bpm * 10u; }
 
 static uint32_t now24(void)
 {
@@ -1113,50 +1147,179 @@ static uint32_t now24(void)
 #endif
 }
 
-static void seq_step_now(void)                  /* the next step sounds */
+static void seq_step_now(int sound)             /* the next step: sounds, or (skipped) only passes */
 {
-    if (ui.seq_step == 0 && ui.load_next >= 0) {   /* a queued pattern comes in on step 1 */
-        slot_apply(set.step, &set.root, &set.scale, &set.bank[ui.load_next]);
-        set.slot = (uint8_t)ui.load_next; ui.dirty = 1; ui.t_change = plat_ms();
-        touched_id = 22; touched_val = ui.load_next + 1; ui.load_next = -1;
+    int32_t n = sq_load_next;
+    if (sq_step == 0 && n >= 0) {               /* a queued pattern comes in on step 1 */
+        slot_apply(set.step, &set.root, &set.scale, &set.bank[n]);
+        set.slot = (uint8_t)n;
+        sq_load_next = -1;
+        sq_loaded = n + 1;
     }
-    seq_trigger(&set.step[ui.seq_step]);
-    ui.seq_step = (ui.seq_step + 1) % (int32_t)NSTEP;
+    if (sound) seq_trigger(&set.step[sq_step]);
+    sq_step = (sq_step + 1) % (int32_t)NSTEP;
 }
 
-static void on_pulse(void)
+static void on_pulse(int sound)                 /* audio interrupt, at seq_at */
 {
-    if (!ui.seq_running || ui.rec_mode)
+    if (!sq_running || ui.rec_mode)
         return;
-    if (ui.clk_first) {
-        ui.clk_first = 0;
-        ui.clk_count = 0;
-        seq_step_now();
-    } else if (++ui.clk_count == 3u) {
+    if (clk_first) {
+        clk_first = 0;
+        clk_count = 0;
+        seq_step_now(sound);
+    } else if (++clk_count == 3u) {
         seq_release();                          /* half a 16th: the note lets go unless it ties */
-    } else if (ui.clk_count >= 6u) {
-        ui.clk_count = 0;
-        seq_step_now();
+    } else if (clk_count >= 6u) {
+        clk_count = 0;
+        seq_step_now(sound);
     }
 }
 
-static int ext_clock(uint32_t now) { return now - ui.ext_ms <= 500u; }
+#ifndef PLAT_HOST
+static volatile uint32_t dbg_us_now, dbg_us_max;   /* the render's time, now and worst since boot */
+#endif
+void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
+{
+    uint32_t i, done = 0, fired = 0, now = now24() + HEARD_TICKS;   /* when this block's first frame is heard */
+    struct larynx_follow f;
+    int follow;
+    uint8_t req;
+#ifndef PLAT_HOST
+    uint32_t t0 = plat_ticks24();
+#endif
+    for (i = 0; i < 2u * n; i++)
+        lr[i] = 0;
+    noteq_take(&keyq);                          /* the keys' and MIDI's notes */
+    noteq_take(&midiq);
+    seq_at = now;
+    larynx_follow_read(&f);
+    follow = f.state == CLOCK_ARMED || f.state == CLOCK_RUNNING;
+    if (f.state != CLOCK_OFF && f.start != seen_start) {   /* a Start or Continue from outside */
+        seen_start = f.start;
+        if (int_run) clock_out(0xFCu, now);     /* ours gives way */
+        int_run = 0;
+        ext_k = 0;
+        if (!f.resume) {                        /* Start: step 1 at the first pulse */
+            seq_halt();
+            sq_step = 0;
+            clk_first = 1;
+        }
+        sq_running = !ui.rec_mode;
+    }
+    if (f.state == CLOCK_STOPPED && was_state != CLOCK_STOPPED && sq_running) {   /* Stop from outside */
+        sq_running = 0;
+        seq_halt();
+    }
+    was_state = f.state;
+    req = sq_req;
+    if (req) {
+        sq_req = SQ_NONE;
+        if (req == SQ_START) {                  /* PLAY: step 1, on ours unless one comes from outside */
+            sq_running = 1;
+            sq_step = 0;
+            clk_first = 1;
+            if (!follow) {
+                int_run = 1;
+                int_acc = INT_PULSE;            /* Start, and its first pulse at once: step 1 */
+                clock_out(0xFAu, now);
+            }
+        } else {
+            if (int_run) clock_out(0xFCu, now);
+            int_run = 0;
+            sq_running = 0;
+            seq_halt();
+        }
+    }
+    if (!sq_running || follow) int_run = 0;
+    else if (!int_run) {                        /* the outside clock went (no Stop): ours plays on, no Start */
+        int_run = 1;
+        int_acc = 0;
+    }
 
-static void seq_start(uint32_t now)             /* PLAY: from step 1, on our clock unless one comes from outside */
-{
-    ui.seq_running = 1;
-    ui.seq_step = 0;
-    ui.clk_first = 1;
-    if (!ext_clock(now))
-        clk_start_req = 1;
+    while (done < n) {                          /* render up to each pulse, play it, render on */
+        uint32_t at = n;
+        if (int_run) {
+            uint32_t inc = set.bpm ? (uint32_t)set.bpm * 24u : 24u;
+            uint32_t s = int_acc >= INT_PULSE ? 0u : (INT_PULSE - int_acc + inc - 1u) / inc;
+            if (done + s < n) at = done + s;
+            int_acc += (at - done) * inc;
+        } else if (sq_running && f.state == CLOCK_RUNNING && fired < MAX_PULSES) {
+            /* pulse ext_k on the loop's line: f.pulse at t0 + t0_frac, then f.per apart */
+            float d = (float)(int32_t)(f.t0 - now) + f.t0_frac + (float)(int32_t)(ext_k - f.pulse) * f.per;
+            if (d < -(float)LOCK_FAR * f.per) {  /* far behind: skip to the line, the steps passing silently */
+                uint32_t k = f.pulse + (uint32_t)(int32_t)(((float)(int32_t)(now - f.t0) - f.t0_frac) * f.inv_per);
+                while ((int32_t)(k - ext_k) > 0) { ext_k++; on_pulse(0); }
+                continue;
+            }
+            d *= 1.0f / TICKS_PER_FRAME;        /* in frames from the block's start */
+            if (d < (float)n) at = d <= (float)done ? done : (uint32_t)(d + 0.5f);
+            if (at > n) at = n;
+        }
+        if (at > done) {
+            app_audio(lr + 2u * done, at - done);   /* Q15, as on Dinghy */
+            done = at;
+        }
+        if (at < n) {                           /* a pulse here */
+            seq_at = now + (uint32_t)((float)at * TICKS_PER_FRAME);
+            if (int_run) {
+                int_acc -= INT_PULSE;
+                clock_out(0xF8u, seq_at);
+            } else
+                ext_k++;
+            on_pulse(1);
+            fired++;
+        }
+    }
+    for (i = 0; i < 2u * n; i++) {               /* MASTER, then Q15 -> 24 bit with Dinghy's -6 dBFS ceiling */
+        int32_t v = (lr[i] * (int32_t)master_q12) >> 12;
+        lr[i] = (v > 32767 ? 32767 : v < -32767 ? -32767 : v) << 7;
+    }
+#ifndef PLAT_HOST
+    dbg_us_now = (plat_ticks24() - t0) / 24u;
+    if (dbg_us_now > dbg_us_max) dbg_us_max = dbg_us_now;
+#endif
 }
-static void seq_stop(uint32_t now)
+
+/* The tick (1 kHz, the timer interrupt, right after the USB poll): MIDI in, stamped as Amenity's (and read here, not
+ * in the main loop, so the screen never holds it up). MIDI THRU, as a daisy chain: everything that comes in (notes,
+ * CC, clock, Start / Stop; not SysEx, the updater's) goes on at once to the other outs, never back where it came from:
+ * USB to Bluetooth, the TRS jack to USB and Bluetooth, Bluetooth to USB (and from a device's link to the computer's,
+ * and back). Incoming pulses are held back only while we play on our own clock (ours go out then: no double clock).
+ * Then what the audio interrupt sends, when it is heard. */
+void app_tick(void)
 {
-    if (ui.seq_running && !ext_clock(now))
-        clk_stop_req = 1;
-    ui.seq_running = 0;
-    seq_halt();
+    uint32_t pkt, now = now24();
+    unsigned bpm;
+    int port;
+    while (plat_midi_in(&pkt, &port)) {
+        uint32_t st = (pkt >> 8) & 0xFFu, d1 = (pkt >> 16) & 0x7Fu, d2 = (pkt >> 24) & 0x7Fu, cin = pkt & 0xFu;
+        uint32_t from = plat_midi_in_from();
+        (void)port;
+        if (cin >= 2u && (cin < 4u || cin > 7u) && !(st == 0xF8u && !clock_ext && sq_running))
+            plat_midi_send(pkt & ~0xF0u, (TO_USB | TO_BLE) & ~from);   /* (cable 0: the jack's come in as 1) */
+        if (st == 0xF8u || st == 0xFAu || st == 0xFBu || st == 0xFCu)
+#ifdef PLAT_HOST
+            larynx_midi_realtime(st, from, now);
+#else
+            larynx_midi_realtime(st, from, plat_midi_in_t24());
+#endif
+        else if ((st & 0xF0u) == 0x90u && d2) noteq_put(&midiq, d1, d2);   /* any channel */
+        else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) noteq_put(&midiq, d1, 0);
+    }
+    now = now24();                              /* (after the reads: their stamps may be later than the tick's start) */
+    clock_ext = (uint8_t)larynx_clock(&bpm, now);
+    while (outq_r != outq_w) {
+        uint32_t r = outq_r;
+        if ((int32_t)(now - outq[r % OUTQ].at) < 0)
+            break;
+        plat_midi_send(outq[r % OUTQ].pkt, MIDI_TO);
+        outq_r = r + 1u;
+    }
 }
+
+static void seq_start(void) { sq_req = SQ_START; }   /* PLAY: the audio interrupt starts it .. */
+static void seq_stop(void) { sq_req = SQ_STOP; }     /* .. and stops it */
 
 static void text_cat(char *d, const char *s)
 {
@@ -1281,7 +1444,7 @@ static void link_poll(void)                     /* every frame: the scan, what h
     default: break;
     }
     if (plat_usb_lost())                        /* a USB session ended: what its notes held lets go */
-        stop((uint32_t)voice[0].note);
+        key_off(ALL_OFF);
     if (last_usb_row >= 0 && ui.link_row == last_usb_row)   /* on the USB row: it stays there as devices come */
         ui.link_row = (uint8_t)link_usb_row();
     if (ui.link_row > link_usb_row())
@@ -1304,7 +1467,7 @@ static void link_poll(void)                     /* every frame: the scan, what h
 static void pass(void)
 {
     uint32_t now = plat_ms(), btn = plat_buttons();
-    uint32_t keys, down, up, rel, b, k, lit = 0, base = (uint32_t)(KEY0 + 12 * set.oct), pkt;
+    uint32_t keys, down, up, rel, b, k, lit = 0, base = (uint32_t)(KEY0 + 12 * set.oct);
     uint32_t led_b = 0, led_k = 0, dim_b = 0, dim_k = 0, mid_k = 0;
 
     keys = plat_keys();                         /* bit k: key k (0 = F3 .. 26 = G5) */
@@ -1331,8 +1494,8 @@ static void pass(void)
                     touched_id = 21; touched_val = n + 1;
                 } else if (n >= 0 && !(set.used >> n & 1u)) {
                     touched_id = 24; touched_val = n + 1;     /* nothing stored there */
-                } else if (n >= 0 && ui.seq_running) {
-                    ui.load_next = n;           /* playing: switch at the next step 1, on the beat */
+                } else if (n >= 0 && sq_running) {
+                    sq_load_next = n;           /* playing: switch at the next step 1, on the beat */
                     touched_id = 23; touched_val = n + 1;
                 } else if (n >= 0) {
                     slot_apply(set.step, &set.root, &set.scale, &set.bank[n]);
@@ -1350,7 +1513,7 @@ static void pass(void)
                 touched_id = 25; touched_val = seq_transpose;
                 continue;
             }
-            play(ui.held[k], 100);              /* always sounds live, recording or not -- you hear what
+            key_on(ui.held[k], 100);              /* always sounds live, recording or not -- you hear what
                                                   * you're entering */
             midi_send(0x90, ui.held[k], 100);
             if (btn & (1u << B_ARP)) {          /* ARP + a key: the randomizer's root, and a pattern on it
@@ -1371,7 +1534,7 @@ static void pass(void)
                 touched_id = 12; touched_val = ui.rec_step;
             }
         }
-        if (up >> k & 1u && ui.held[k] < 128u) { stop(ui.held[k]); midi_send(0x80, ui.held[k], 0); }
+        if (up >> k & 1u && ui.held[k] < 128u) { key_off(ui.held[k]); midi_send(0x80, ui.held[k], 0); }
     }
 
     b = btn & ~ui.prev_btn;                     /* buttons pressed since the last pass .. */
@@ -1423,7 +1586,7 @@ static void pass(void)
     ui.save_pending &= ~rel;
     if (b & (1u << B_REC)) {                    /* toggle record mode: stop playback, reset the cursor */
         ui.rec_mode = !ui.rec_mode;
-        if (ui.rec_mode) { seq_stop(now); ui.rec_step = 0; stop((uint32_t)voice[0].note); }
+        if (ui.rec_mode) { seq_stop(); ui.rec_step = 0; key_off(ALL_OFF); }
     }
     if (b & (1u << B_PLAY) && (btn & (1u << B_ARP))) {   /* ARP + PLAY: a random pattern, playing on as it
                                                   * was -- heard from the next step */
@@ -1431,8 +1594,8 @@ static void pass(void)
         ui.dirty = 1; ui.t_change = now;
         touched_id = 17; touched_val = (int32_t)++ui.randoms;
     } else if (b & (1u << B_PLAY) && !ui.rec_mode) {   /* toggle the sequencer; can't run while recording */
-        if (ui.seq_running) seq_stop(now);
-        else seq_start(now);
+        if (sq_running) seq_stop();
+        else seq_start();
     }
 
     {                                            /* 7 knobs, no menus (see the comment above knob()) */
@@ -1509,50 +1672,10 @@ static void pass(void)
         }
     }
 
-    {
-        int port;
-        uint32_t t24 = now24();
-        while (plat_midi_in(&pkt, &port)) {     /* MIDI in (USB, TRS, Bluetooth), any channel */
-            uint32_t st = (pkt >> 8) & 0xFFu, d1 = (pkt >> 16) & 0x7Fu, d2 = (pkt >> 24) & 0x7Fu;
-            if ((st & 0xF0u) == 0x90u && d2) play(d1, d2);
-            else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) stop(d1);
-            else if (st == 0xF8u) {             /* a pulse: due now, Bluetooth's at its sender's time + BLE_LATE */
-#ifdef PLAT_HOST
-                uint32_t due = port == PORT_BLE ? t24 + BLE_LATE : t24;
-#else
-                uint32_t due = port == PORT_BLE ? plat_midi_in_t24() + BLE_LATE : t24;
-#endif
-                ui.ext_ms = now;
-                if (ui.extq_w - ui.extq_r < 32u)
-                    ui.extq[ui.extq_w++ % 32u] = due;
-                else
-                    on_pulse();
-            } else if (st == 0xFAu) {           /* Start: the first pulse after it plays step 1 */
-                ui.ext_ms = now;
-                ui.extq_r = ui.extq_w;
-                if (ui.seq_running && !ui.rec_mode) seq_halt();
-                ui.seq_running = !ui.rec_mode;
-                ui.seq_step = 0;
-                ui.clk_first = 1;
-            } else if (st == 0xFBu) {           /* Continue */
-                ui.ext_ms = now;
-                ui.seq_running = !ui.rec_mode;
-            } else if (st == 0xFCu) {           /* Stop */
-                ui.extq_r = ui.extq_w;
-                ui.seq_running = 0;
-                seq_halt();
-            }
-        }
-        while (ui.extq_r != ui.extq_w && (int32_t)(t24 - ui.extq[ui.extq_r % 32u]) >= 0) {
-            ui.extq_r++;
-            on_pulse();
-        }
-        clk_bpm = (uint16_t)set.bpm;            /* the internal clock: its pulses, when no outside one comes */
-        clk_run_int = (uint8_t)(ui.seq_running && !ui.rec_mode && !ext_clock(now));
-        while (ui.pulses_seen != clk_pulses) {
-            ui.pulses_seen++;
-            on_pulse();
-        }
+    if (sq_loaded) {                             /* a queued pattern came in on step 1 (the audio interrupt) */
+        touched_id = 22; touched_val = sq_loaded;
+        sq_loaded = 0;
+        ui.dirty = 1; ui.t_change = now;
     }
 
     /* the lights, in three levels: lit, the middle tier (plat_lights_mid) and the glow */
@@ -1570,7 +1693,7 @@ static void pass(void)
         mid_k = 0;
         for (k = 0; k < NSLOT; k++) {
             if (set.used >> k & 1u) mid_k |= 1u << white_key_id(k);
-            if (k == set.slot || (int32_t)k == ui.load_next) led_k |= 1u << white_key_id(k);
+            if (k == set.slot || (int32_t)k == sq_load_next) led_k |= 1u << white_key_id(k);
         }
     }
     if (ui.rec_mode)                             /* the cursor's own soft glow among the step LEDs */
@@ -1578,13 +1701,13 @@ static void pass(void)
     if (set.oct < 0) led_b |= 1u << B_OCTDN;
     if (set.oct > 0) led_b |= 1u << B_OCTUP;
     if (ui.rec_mode) led_b |= 1u << B_REC;
-    if (ui.seq_running) led_b |= 1u << B_PLAY;
+    if (sq_running) led_b |= 1u << B_PLAY;
     {                                            /* GLO = slide, ENV = accent: GLO glows softly in record mode
                                                    * (ENV always); lit while held (GLO: in record mode), or when
                                                    * the step under the cursor has it; while playing, lit on the
                                                    * step that sounds if it has it */
         uint32_t f = ui.rec_mode ? set.step[ui.rec_step].flags
-                   : ui.seq_running ? set.step[(ui.seq_step + (int32_t)NSTEP - 1) % (int32_t)NSTEP].flags : 0u;
+                   : sq_running ? set.step[(sq_step + (int32_t)NSTEP - 1) % (int32_t)NSTEP].flags : 0u;
         dim_b = 1u << B_LFO | 1u << B_ENV | 1u << B_FX | 1u << B_SEQ | 1u << B_ARP | 1u << B_SEL | 1u << B_SAVE;
         if (ui.rec_mode) dim_b |= 1u << B_GLO;
         if ((ui.rec_mode && (btn & (1u << B_GLO))) || (f & 2u)) led_b |= 1u << B_GLO;
@@ -1594,7 +1717,7 @@ static void pass(void)
     plat_lights(led_b, led_k, dim_b, dim_k, 2);
     plat_lights_mid(0, mid_k);
     if (ui.rec_mode) vow_lock = (int32_t)STEP_VOW(set.step[ui.rec_step].flags);   /* hear and see the step */
-    else if (!ui.seq_running) vow_lock = 0;
+    else if (!sq_running) vow_lock = 0;
 
     if (lit != ui.lit_drawn) { ui.lit_drawn = lit; draw_keys(lit); }   /* redraw only what changed */
     if (!ui.page_link) {                         /* the throat: redrawn when the vowel (with the LFOs) or the
@@ -1633,7 +1756,7 @@ static void pass(void)
     if (set.oct != ui.oct_drawn) { ui.oct_drawn = set.oct; draw_status(set.oct); }
     {
         int32_t mark = ui.rec_mode ? ui.rec_step
-                     : ui.seq_running ? (ui.seq_step + (int32_t)NSTEP - 1) % (int32_t)NSTEP : -1;
+                     : sq_running ? (sq_step + (int32_t)NSTEP - 1) % (int32_t)NSTEP : -1;
         uint32_t changed = mark != ui.mark_drawn;
         for (k = 0; k < NSTEP; k++)
             if (ui.flags_drawn[k] != set.step[k].flags) { ui.flags_drawn[k] = set.step[k].flags; changed = 1; }
@@ -1665,7 +1788,7 @@ static void pass(void)
     }
 #endif
 
-    if (ui.dirty && !ui.seq_running && quiet() && now - ui.t_change > 2000u) {   /* 2 s after the change, when
+    if (ui.dirty && !sq_running && quiet() && now - ui.t_change > 2000u) {   /* 2 s after the change, when
                                                    * silent (a save stalls the sound) and not playing: the gaps
                                                    * between a pattern's notes are silent too, and a stall there
                                                    * would break the groove */
@@ -1689,8 +1812,8 @@ int app_expect(const char *what, int *got)
     if (!strcmp(what, "note")) *got = voice[0].gate ? voice[0].note : -1;
     else if (!strcmp(what, "octave")) *got = set.oct;
     else if (!strcmp(what, "rec")) *got = ui.rec_mode;
-    else if (!strcmp(what, "playing")) *got = ui.seq_running;
-    else if (!strcmp(what, "step")) *got = ui.seq_step;
+    else if (!strcmp(what, "playing")) *got = sq_running;
+    else if (!strcmp(what, "step")) *got = sq_step;
     else if (!strcmp(what, "dirty")) *got = (int)ui.dirty;
     else if (!strcmp(what, "bpm")) *got = set.bpm;
     else if (!strcmp(what, "used")) *got = set.used;

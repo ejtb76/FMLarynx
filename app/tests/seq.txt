@@ -27,12 +27,14 @@ shot playing.png
 tap PLAY
 expect playing 0
 expect note -1
-# MIDI clock: Start, then 12 clocks: step 1 on the first, step 2 six later
+# MIDI clock: Start, then 10 clocks: step 1 on the first, step 2 six later (a 13th would already be played
+# when it is heard: the pulses go by the smoothed time line, ahead of their coming in)
 midi FA 00 00
-clock 12
+clock 10
 expect playing 1
 expect step 2
 midi FC 00 00
+wait 10
 expect playing 0
 # store it on the first white key, then empty the pattern and load it back after a reboot
 press SAVE

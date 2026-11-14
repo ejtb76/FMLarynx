@@ -34,10 +34,11 @@ expect usbh_clocks <102
 tap PLAY
 expect playing 0
 usbh midi FA 00 00
-usbh clock 12
+usbh clock 10
 expect playing 1
 expect step 2
 usbh midi FC 00 00
+wait 10
 expect playing 0
 tap EDIT
 turn SELECT 3

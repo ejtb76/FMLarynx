@@ -19,18 +19,18 @@ clock 13
 expect playing 1
 expect step 3
 midi FC 00 00
+wait 10
 expect playing 0
 expect note -1
-# over Bluetooth: taken 20 ms after the sender's time
+# over Bluetooth: at the sender's time (ble_midi_time), smoothed like the others: the first pulse is step 1
 ble connect
 wait 1200
 midi BLE FA 00 00
 midi BLE F8 00 00
 wait 10
-expect step 0
-wait 15
 expect step 1
 midi BLE FC 00 00
+wait 10
 # the outside clock stops without a Stop: after 500 ms the internal one plays on
 midi FA 00 00
 clock 7

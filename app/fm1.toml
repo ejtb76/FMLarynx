@@ -5,7 +5,7 @@ id_prefix = "FM-1_984"         # package identity: dev FM-1_98400, releases FM-1
                                # as FM-1_984: agree the wider pattern with the hub before releasing
 usb_manufacturer = "FMLARYNX"
 usb_product = "FMLARYNX FM-1"
-o2 = []
+o2 = ["larynx_clock.c"]       # the clock follower (floats), as Amenity builds its own
 words = "words.tsv"
 ble = true                     # Bluetooth MIDI
 ble_stack = "own"              # fm1-base's own stack: nothing of JieLi's linked (the licence stays GPL-3.0)

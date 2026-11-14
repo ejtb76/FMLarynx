@@ -188,7 +188,13 @@ off, so your last changes are saved.
 
 - **MIDI in** (USB, the TRS jack, Bluetooth): notes on any channel play the voice, with velocity. MIDI clock drives
   the sequencer: **Start** arms it, the first clock after it plays step 1, a step every six clocks. **Stop** stops
-  it. When no clock has come for half a second, it plays on at its own tempo.
+  it. When no clock has come for half a second, it plays on at its own tempo. FMLarynx follows a clock the way
+  Amenity does: it smooths the clock's timing, so steps stay steady when USB, Bluetooth or a DAW's buffers make the
+  clock jittery.
+- **MIDI THRU (daisy chain):** everything that comes in (notes, CC, clock, Start and Stop; not SysEx) goes straight
+  on to the other outs, never back where it came from: the TRS jack to USB and Bluetooth, USB to Bluetooth,
+  Bluetooth to USB. So your DAW over USB can lead FMLarynx and a second FM-1 over Bluetooth at the same time. While
+  FMLarynx plays on its own tempo, incoming clock is not passed on (its own goes out instead): no double clock.
 - **MIDI out** (USB and Bluetooth): notes from the keys and the sequencer, and, while the sequencer runs on its own
   tempo, MIDI clock with Start and Stop, so a DAW or a second FM-1 (Amenity, say) follows FMLarynx.
 - **Your DAW sees a new device name:** "FMLARYNX FM-1". Turn its clock output on again for it (FL Studio: Options,
@@ -197,7 +203,8 @@ off, so your last changes are saved.
   one, another FM-1 for instance), then the USB port, which can be a **device** (to a computer) or a **host** to a
   USB MIDI device such as another FM-1. **SELECT** moves the cursor, **SAVE** does what the bottom line says
   (CONNECT, LET GO, HOST, DEVICE), **EDIT** goes back. A computer, phone or tablet can also connect to FMLarynx over
-  Bluetooth MIDI on its own.
+  Bluetooth MIDI on its own. To connect two FM-1s, open this page on one of them only: while it looks for devices
+  an FM-1 can't be found itself.
 - **Audio:** the FM-1 shows up as a 16-bit stereo audio input at 44.1 kHz, so you can record it straight into a DAW.
 
 ## Installing

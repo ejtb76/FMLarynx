@@ -1,0 +1,44 @@
+# MIDI THRU (a daisy chain), as Amenity's: the jack to USB and Bluetooth, USB to Bluetooth, Bluetooth to USB; never
+# back where it came from; incoming clock goes on too, held back only while we play on our own clock.
+#   sh build.sh --host && app/build/host/fmlarynx_host app/tests/thru.txt build/thru
+wait 1000
+out
+ble connect
+wait 300
+midi TRS 90 3C 64
+wait 20
+expect_out USB 90 3C 64
+expect_out BLE 90 3C 64
+out
+midi USB B0 07 64
+wait 20
+expect_out BLE B0 07 64
+expect_no_out USB B0 07 64
+out
+midi BLE 80 3C 00
+wait 20
+expect_out USB 80 3C 00
+expect_no_out BLE 80 3C 00
+# a computer's clock: on to Bluetooth, Start and Stop too; we follow it and send none of our own
+out
+midi USB FA
+clock 24 20
+wait 50
+expect_out BLE FA
+expect clocks_out 24
+expect playing 1
+expect step >3
+out
+midi USB FC
+wait 50
+expect_out BLE FC
+expect playing 0
+# our own clock: its pulses only, an incoming one held back (no double clock)
+wait 1000
+tap PLAY
+wait 1000
+clock 10 20
+# (24 passed on before, ours: 1.28 s at 48 a second; the 10 coming in would make it 95)
+expect clocks_out >82
+expect clocks_out <88
+tap PLAY
