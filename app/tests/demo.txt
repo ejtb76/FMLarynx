@@ -1,0 +1,15 @@
+# A fresh start (the first install, the browser's emulator) has a pattern: PLAY plays it at once, step 1 a C3
+#   sh build.sh --host && app/build/host/fmlarynx_host app/tests/demo.txt build/demo
+master 4096
+wait 500
+wav demo.wav
+press PLAY
+wait 30
+expect playing 1
+expect note 48
+release PLAY
+wait 4000
+expect step >0
+tap PLAY
+wait 500
+expect playing 0

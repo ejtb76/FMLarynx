@@ -1056,11 +1056,27 @@ static struct {
     char hold_drawn[160];                       /* what the panel last showed */
 } ui;
 
+/* the pattern a fresh start has (the first install, the browser's emulator): an acid line in C minor, so PLAY plays
+ * something at once -- accents (A), slides (S) and a few vowels; flags as struct seq_step_s */
+#define D_N 1u
+#define D_S 2u
+#define D_A 4u
+#define D_V(v) ((uint32_t)(v) << 3)
+static const struct seq_step_s DEMO[NSTEP] = {
+    {48, D_N | D_A}, {48, D_N}, {60, D_N | D_S}, {48, D_N | D_V(3)},
+    {0, 0}, {51, D_N}, {48, D_N | D_A}, {55, D_N | D_S},
+    {58, D_N | D_V(4)}, {48, D_N}, {0, 0}, {60, D_N | D_A | D_S},
+    {63, D_N | D_V(1)}, {48, D_N}, {55, D_N | D_S}, {53, D_N | D_V(5)},
+};
+
 void app_init(void)
 {
     if (plat_store_load(OBJ_SETTINGS, &set, sizeof set) != (int)sizeof set || set.magic != SET_MAGIC) {
+        uint32_t k;
         memset(&set, 0, sizeof set);
         set.magic = SET_MAGIC;
+        for (k = 0; k < NSTEP; k++)              /* (not stored as a pattern: SAVE does that) */
+            set.step[k] = DEMO[k];
     }
     if (set.oct < -2 || set.oct > 2) set.oct = 0;
     if (set.bpm < 40 || set.bpm > 300) set.bpm = 120;
