@@ -1,0 +1,19 @@
+# FMLarynx's build settings (fm1-base's tools/build.py, through ./build.sh)
+name = "FMLARYNX"              # APP_NAME is in app.h; this names the build's files: fmlarynx.fwsc, fmlarynx-X.Y.fwsc
+id_prefix = "FM-1_984"         # package identity: dev FM-1_98400, releases FM-1_984XXYYZZ. The hub lists FMLarynx
+                               # as FM-1_984: agree the wider pattern with the hub before releasing
+usb_manufacturer = "FMLARYNX"
+usb_product = "FMLARYNX FM-1"
+o2 = []
+# the site (tools/make_site.py)
+tagline = "A talking formant synth for the FM-1"
+repo = "https://github.com/ejtb76/FMLarynx"
+licence = "GPL-3.0-only"
+credits = "Built on fm1-base and felucca-bsp, from Felucca by Leo Kuroshita (Hügelton Instruments)."
+# firmware.json, for firmware hubs (fm1-base's docs/FIRMWARE-JSON.md): the build writes it from these and the keys above
+author = "Presethead"
+description = "A throaty talking formant synth with a 303-style pattern sequencer: a saw wave through a three-formant vowel filter with an envelope, a resonant low-pass, drive and ping-pong delay. 16 steps with vowels, accent and slide per step, a pattern randomizer and 16 stored patterns."
+tags = ["synth", "sequencer"]
+install = "https://ejtb76.github.io/FMLarynx/install/"
+site = "https://ejtb76.github.io/FMLarynx/"
+screenshot = "app/site/img/screen.png"

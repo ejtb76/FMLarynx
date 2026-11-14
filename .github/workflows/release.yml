@@ -1,17 +1,132 @@
-# A version tag (git tag v0.2 && git push fork v0.2) has GitHub build, sign and release FMLarynx with the Firmware
-# Hub's shared workflow: the hub then shows "Built from source on GitHub" on its card. Never replace the .fwsc by hand
-# afterwards, or the signature no longer matches.
-name: release
+# SPDX-License-Identifier: MPL-2.0
+# FMLarynx's release: built from source on GitHub by the shared FM-1 builder (zvenson/fm1-build), its packages
+# signed with build provenance, so The Firmware Hub shows them as built from source. From fm1-base's template
+# (base/template/.github/workflows/release.yml, Charles Vestal), changed for FMLarynx (as Amenity's):
+#   - the release stays a DRAFT: publish it by hand when the hub is ready for it (the Pages workflow runs then)
+#   - JieLi's Apache-2.0 licence beside the packages (fm1-base's LICENSING.md: packages carry three SDK files)
+name: Build and attest firmware
+
 on:
   push:
-    tags: ["v*"]
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fmlarynx-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build:
+  prepare:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Prepare a draft without replacing a public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: FMLarynx
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then exit 0; fi
+          version=${GITHUB_REF_NAME#v}
+          # (the versions base/tools/build.py --release takes)
+          [[ "$version" =~ ^[0-9]{1,2}\.[0-9]{1,2}(\.[0-9]{1,2})?(-[A-Za-z0-9]+)?$ ]]
+          flags=(--prerelease=false)
+          if [[ "$version" == *-* ]]; then flags=(--prerelease --latest=false); fi
+          if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft); then
+            [[ "$draft" == true ]] || { echo 'Refusing to rebuild a public release'; exit 1; }
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
+              --title "$TITLE $version" --generate-notes "${flags[@]}"
+          fi
+
+  firmware:
+    needs: prepare
+    # The Firmware Hub recognises attestations from this reviewed builder tag.
     uses: zvenson/fm1-build/.github/workflows/build.yml@v1
     permissions:
-      contents: write        # the release
-      id-token: write        # the signing certificate
-      attestations: write    # the attestation
+      contents: write
+      id-token: write
+      attestations: write
     with:
-      build: ./build.sh --release "${GITHUB_REF_NAME#v}"
-      packages: build/*.fwsc
+      sdk: true
+      tests-block: true
+      build: |
+        set -euo pipefail
+        pkg=fmlarynx
+        # the builder checks out without submodules: fm1-base (base/) and its felucca-bsp (base/bsp/), at the
+        # commits this one links
+        git submodule update --init --recursive
+        # the fonts' OpenType features (base/tools/gen_font.py): Pillow's raqm, which loads the system's FriBiDi
+        sudo apt-get install -y -qq libfribidi0
+        python3 -c "from PIL import features; assert features.check('raqm'), 'Pillow without raqm'"
+        test "$(git -C "$AC79_SDK" rev-parse HEAD)" = d179b4484759423312073f5fbb232501aa491047
+        # Emscripten for the .rfm1 (host apps: RemoteFM1), a fixed version from emsdk at a fixed commit
+        git clone -q https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+        git -C "$RUNNER_TEMP/emsdk" checkout -q a2b92777574c2feda07994cd4f1079a3dfc151f8   # emsdk 6.0.10
+        "$RUNNER_TEMP/emsdk/emsdk" install 6.0.10
+        "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.10
+        set +u; source "$RUNNER_TEMP/emsdk/emsdk_env.sh"; set -u
+        emcc --version
+        mkdir -p build/release-assets
+        if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+          version=${GITHUB_REF_NAME#v}
+          ./build.sh --release "$version"
+          cp "app/build/$pkg-$version.fwsc" build/release-assets/
+          cp "app/build/$pkg.bin" "build/release-assets/$pkg-$version-app.bin"
+          # (the tests check the update path against app/build/$pkg.fwsc: there, the release package itself)
+          cp "app/build/$pkg-$version.fwsc" "app/build/$pkg.fwsc"
+          # the app for host apps (base/README.md, .rfm1)
+          ./build.sh --rfm1 --release "$version"
+          cp "app/build/$pkg-$version.rfm1" build/release-assets/
+          # the browser version the site gets (pages.yml): built here too, so a tag finds what would break it
+          ./build.sh --web --release "$version"
+          test -f app/build/emu/app.wasm
+        else
+          ./build.sh
+          cp "app/build/$pkg.fwsc" build/release-assets/
+          cp "app/build/$pkg.bin" "build/release-assets/$pkg-app.bin"
+          ./build.sh --rfm1
+          cp app/build/rfm1/"$pkg"-dev+*.rfm1 "build/release-assets/$pkg.rfm1"
+        fi
+        # the firmware described for hubs (base/docs/FIRMWARE-JSON.md), from the build with Bluetooth
+        cp app/build/firmware.json build/release-assets/
+        # the packages carry three files of JieLi's AC79 SDK, Apache-2.0
+        cp base/LICENSES/Apache-2.0.txt build/release-assets/JieLi-SDK-Apache-2.0.txt
+      test: |
+        set -euo pipefail
+        pkg=fmlarynx
+        [ -f "app/build/$pkg.fwsc" ]
+        sh tests/run_tests.sh
+      packages: build/release-assets/*
+
+  verify:
+    needs: firmware
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: build/attested
+      - name: Verify checksums and signed source provenance
+        working-directory: build/attested
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha256sum --check SHA256SUMS
+          for package in build/release-assets/*.fwsc build/release-assets/*-app.bin build/release-assets/*.rfm1 \
+              build/release-assets/firmware.json; do
+            gh attestation verify "$package" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow zvenson/fm1-build/.github/workflows/build.yml \
+              --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA"
+          done
+      # The draft is NOT published here: check it, mail The Firmware Hub the identity range, then publish it on
+      # GitHub. Publishing runs pages.yml, which puts the site up with this release's package.

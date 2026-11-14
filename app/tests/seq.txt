@@ -1,0 +1,55 @@
+# Record four notes (REC, the keys), play them (PLAY) on the internal clock, then on MIDI clock; a rest with SEL;
+# store the pattern on a white key (SAVE + key) and load it after a reboot (SEL + key).
+master 4096
+wait 200
+tap REC
+expect rec 1
+key 7 down
+key 7 up
+key 11 down
+key 11 up
+key 14 down
+key 14 up
+tap SEL
+key 7 down
+key 7 up
+shot record.png
+tap REC
+expect rec 0
+tap PLAY
+expect playing 1
+out
+wait 600
+expect_out USB 90 3C 64
+expect_out USB 90 40 64
+expect_out USB 90 43 64
+shot playing.png
+tap PLAY
+expect playing 0
+expect note -1
+# MIDI clock: start (step 1 at once), 12 clocks = two 16ths more, stop
+midi FA 00 00
+clock 12
+expect playing 1
+expect step 3
+midi FC 00 00
+expect playing 0
+# store it on the first white key, then empty the pattern and load it back after a reboot
+press SAVE
+key w0 down
+key w0 up
+release SAVE
+expect used 1
+wait 2200
+expect store_writes 1
+reboot
+wait 100
+expect used 1
+press SEL
+key w0 down
+key w0 up
+release SEL
+tap PLAY
+wait 200
+expect_out USB 90 3C 64
+tap PLAY

@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "fmlarynx",
+  "name": "FMLARYNX",
+  "author": "Presethead",
+  "license": "GPL-3.0-only",
+  "tagline": "A talking formant synth for the FM-1",
+  "description": "A throaty talking formant synth with a 303-style pattern sequencer: a saw wave through a three-formant vowel filter with an envelope, a resonant low-pass, drive and ping-pong delay. 16 steps with vowels, accent and slide per step, a pattern randomizer and 16 stored patterns.",
+  "tags": ["synth", "sequencer"],
+  "install": "https://ejtb76.github.io/FMLarynx/install/",
+  "site": "https://ejtb76.github.io/FMLarynx/",
+  "source": "https://github.com/ejtb76/FMLarynx",
+  "screenshot": "app/site/img/screen.png",
+  "hardware": {
+    "models": ["FM-1"],
+    "flash": ["856014", "B36014"],
+    "features": ["usb-audio-in", "usb-audio-out", "screen-reader"]
+  },
+  "credits": "Built on fm1-base and felucca-bsp, from Felucca by Leo Kuroshita (Hügelton Instruments)."
+}

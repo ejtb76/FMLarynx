@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# FMLarynx's site on GitHub Pages, made when a release is published (or by hand, for the latest release), as
+# Amenity's:
+#   index.html  the front page (app/site/landing.md)        install/  the web installer, with the release's package
+#   emu/        FMLarynx in the browser                      firmware/ the package, to download
+# made by fm1-base's tools/make_site.py from the release's attested package (release.yml), not a new build of it;
+# it goes to Pages as an Actions artifact, not into git.
+name: Site
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  attestations: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    # a published prerelease (a test, as v3.0.0-rc1) never replaces the site
+    if: github.event_name != 'release' || !github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: The release
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          tag="${TAG:-$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "release $tag"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.rel.outputs.tag }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Tools
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq libfribidi0
+          python3 -m pip install -q Pillow numpy scipy
+          git clone -q https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          git -C "$RUNNER_TEMP/emsdk" checkout -q a2b92777574c2feda07994cd4f1079a3dfc151f8   # emsdk 6.0.10
+          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.10
+          "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.10
+      - name: The release's package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/pkg
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "fmlarynx-$VERSION.fwsc" --dir build/pkg
+          gh attestation verify "build/pkg/fmlarynx-$VERSION.fwsc" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow zvenson/fm1-build/.github/workflows/build.yml
+      - name: The site
+        env:
+          VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          sh build.sh --web --release "$VERSION"
+          python3 base/tools/make_site.py app "build/pkg/fmlarynx-$VERSION.fwsc" "$VERSION" build/site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/site
+      - id: deployment
+        uses: actions/deploy-pages@v4

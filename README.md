@@ -7,16 +7,18 @@ vowel filter with an envelope, an added resonant LPF with cutoff and a ping-pong
 sequencer has vowels, accent and slide per step, a pattern randomizer and storage for 16 patterns.
 
 It is a port of FormantSynth, a VST3 plugin, to the FM-1's chip, and is built on
-[Dinghy](https://github.com/zvenson/dinghy) by zvenson.
+[fm1-base](https://github.com/charlesvestal/fm1-base) and felucca-bsp, from Felucca by Leo Kuroshita (Hügelton
+Instruments).
 
 <p align="center"><img src="docs/screen.png" width="240" alt="FMLarynx's screen: a throat whose opening follows the vowel, the note in it, the step strip and the keyboard"></p>
 
 > **Status: 0.1, runs on the FM-1.** Tested on the device: the sound engine, all controls, the sequencer with its
 > randomizer and stored patterns, the effects, the screen, and updating over USB.
 
-**What it keeps:** FMLarynx stores its patterns and settings in the FM-1's settings sector, the place Felucca,
-SLOOP, Dinghy and their relatives use for theirs: after one of them has run, FMLarynx starts from its defaults again
-(and the other way round). It does not read other firmwares' projects or samples.
+**What it keeps:** FMLarynx stores its patterns and settings in fm1-base's store (two copies, so a save cut short
+leaves the one before). Patterns saved with FMLarynx 0.3 or older (on Dinghy) do not carry over: the first start of
+the fm1-base version begins from the defaults. Other firmwares on fm1-base use the same flash: after one of them has
+run, FMLarynx may start from its defaults again.
 
 **Package identity:** `FM-1_984`, for every release.
 
@@ -199,44 +201,40 @@ the same way. Or download the `.fwsc` from this repository's
 To build it yourself, then install over USB:
 
 ```sh
-./build.sh                                       # -> build/fmlarynx.fwsc
-python3 tools/fm1_install.py build/fmlarynx.fwsc   # asks before it writes, then restarts into the new build
-python3 tools/fm1_install.py --info              # what runs on the connected FM-1
+git clone --recursive https://github.com/ejtb76/FMLarynx && cd FMLarynx
+./build.sh                                                  # -> app/build/fmlarynx.fwsc
+python3 base/tools/fm1_install.py app/build/fmlarynx.fwsc   # asks before it writes, then restarts into the new build
+python3 base/tools/fm1_install.py --info                    # what runs on the connected FM-1
 ```
 
 The build needs Linux on x86-64 (or Windows with WSL, or macOS with Docker), Python 3 with Pillow, the JieLi
-toolchain and three files of the JieLi AC79 SDK:
+toolchain and the JieLi AC79 SDK: fm1-base's [README](https://github.com/charlesvestal/fm1-base) says how to get
+them (`base/tools/get_toolchain.sh`).
 
-```sh
-pip3 install Pillow mido python-rtmidi
-tools/get_toolchain.sh                           # JieLi's clang for the chip, to ~/.jieli/toolchain
-git clone --depth 1 --branch AC79NN_SDK_V1.2.1_2023-12-13 \
-    https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git ~/fw-AC79_AIoT_SDK
-```
+`./build.sh --host` builds a simulator that runs the same firmware on your computer, writing the sound to a WAV and
+the screen to images; `sh tests/run_tests.sh` runs the scripts in `app/tests/` on it.
 
-`tests/run_host.sh` runs the same firmware on your computer, writing the sound to a WAV and the screen to images.
-
-**If something goes wrong:** hold **OCT-** while switching on to reach the USB rescue mode (no sound, only the
-updater), and install a working build from there. If the firmware crashes twice at boot, the FM-1 goes there by
-itself.
+**If something goes wrong:** hold **REC** while switching on to reach update mode, and install a working build (or
+the official firmware) from there. If the firmware fails to start twice, the FM-1 starts in safe mode with USB on.
 
 ## For developers
 
-The whole synth is in [firmware/src/dinghy.c](firmware/src/dinghy.c). Everything underneath it (boot, USB, updates,
-the audio interrupt, settings) is Dinghy's platform: see [docs/API.md](docs/API.md) for what it offers and
-[docs/RULES.md](docs/RULES.md) for the chip's rules (no FPU, no 64-bit division, the audio time budget), which the
-build checks for you.
+The whole synth is in [app/app.c](app/app.c), an app on fm1-base (`base/`): its
+[`include/plat.h`](https://github.com/charlesvestal/fm1-base/blob/main/include/plat.h) is what the platform offers,
+and its build checks the chip's rules for you (no double, no 64-bit multiply inlined beside a load: FMLarynx's go
+through `app/larynx_mul.h`).
 
 ## License and credits
 
 GPL-3.0-only: you may change and share it, and whoever gets a firmware built from it gets its source too. Details
 and third-party parts in [LICENSING.md](LICENSING.md).
 
-- **FMLarynx** (the formant synth, sequencer, screen and effects in `dinghy.c`): Presethead
+- **FMLarynx** (the formant synth, sequencer, screen and effects in `app/app.c`): Presethead
 - The formant filter design follows **[MouthTowel](https://github.com/nickb808-dev/er301-MouthTowel)** by nickb808-dev
-- **[Dinghy](https://github.com/zvenson/dinghy)** (the app skeleton, the wiring `platform.c`, host mode, docs): zvenson
-- **The platform:** Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments
-  ([Felucca](https://github.com/hugelton/Felucca)), with the changes of [SLOOP](https://github.com/isod89/sloop-fm1)
-  (isod89)
+- **The platform:** [fm1-base](https://github.com/charlesvestal/fm1-base) by Charles Vestal and
+  [felucca-bsp](https://github.com/hugelton/felucca-bsp), from [Felucca](https://github.com/hugelton/Felucca) by Leo
+  Kuroshita (@kurogedelic), Hügelton Instruments (MPL-2.0)
+- **[Dinghy](https://github.com/zvenson/dinghy)** by zvenson: FMLarynx 0.1 to 0.3 were built on it, and `app/app.c`
+  grew from its app skeleton
 
 "M-VAVE" and "FM-1" belong to their owners. FMLarynx is not made or endorsed by them.

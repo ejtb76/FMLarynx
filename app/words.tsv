@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# FMLarynx's words for a screen reader (fm1-reader): the text on the screen <TAB> what to say.
+# url: https://ejtb76.github.io/FMLarynx/words/
+FMLARYNX	f m larynx
+RES	resonance
+ENV MOD	envelope mod

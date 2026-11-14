@@ -1,0 +1,40 @@
+# Keys, MIDI in and the octave: sh build.sh --host && app/build/host/fmlarynx_host app/tests/keys.txt build/keys
+# (the port's first check against Dinghy's simulator: this run's sound was the same, sample for sample)
+master 4096
+wav keys.wav
+wait 160
+key 7 down
+wait 30
+expect note 60
+expect_out USB 90 3C 64
+wait 470
+key 11 down
+key 14 down
+wait 298
+expect note 67
+shot chord.png
+wait 500
+key 7 up
+key 11 up
+key 14 up
+wait 50
+out
+midi 90 51 78
+wait 100
+expect note 81
+expect_no_out USB 90 51 78
+midi 80 51 00
+wait 300
+expect note -1
+tap OCT+
+expect octave 1
+key 2 down
+wait 50
+expect note 67
+key 2 up
+wait 2200
+expect store_writes 1
+reboot
+wait 100
+expect octave 1
+wavstop

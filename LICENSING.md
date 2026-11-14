@@ -1,28 +1,42 @@
 # Licensing
 
-FMLarynx, like Dinghy it is built on, is free software under the GNU General Public License, version 3 only (`GPL-3.0-only`, full text in
+FMLarynx is free software under the GNU General Public License, version 3 only (`GPL-3.0-only`, full text in
 `LICENSE`). You may use, study, change and share it. If you give someone a firmware built from it, give them its
 complete source under the same licence too.
+
+It is built on **fm1-base** (Charles Vestal) and **felucca-bsp** (in `base/`, a git submodule), which are under the
+Mozilla Public License 2.0, file by file: their files stay MPL-2.0 inside this GPL-3.0 firmware. Much of them comes
+from [Felucca](https://github.com/hugelton/Felucca) by Leo Kuroshita (@kurogedelic), Hügelton Instruments, with his
+permission ([felucca-bsp#4](https://github.com/hugelton/felucca-bsp/issues/4)). Their own `LICENSING.md` and
+`CREDITS.md` list their parts and their third-party code.
+
+Bluetooth MIDI, when built in, is fm1-base's own stack (`ble_stack = "own"`): nothing of JieLi's closed Bluetooth
+libraries is linked, so the firmware stays GPL-3.0.
+
+FMLarynx 0.1 to 0.3 were built on [Dinghy](https://github.com/zvenson/dinghy) (GPL-3.0-only); those versions stay
+under their licence, in this repository's history.
 
 ## Who made what
 
 | | |
 | --- | --- |
-| The platform: `firmware/hal/`, `firmware/loader/`, `crt0.S`, `app.ld`, `firmware/src/` (`usb.c`, `ota.c`, `recovery.c`, `lcd.c`, `gfx.c`, `libc.c`, `bootguard.h`, `uac_fir.h`), `tools/` | Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments ([Felucca](https://github.com/hugelton/Felucca)), with the changes of [SLOOP](https://github.com/isod89/sloop-fm1) (isod89) |
-| FMLarynx: the formant synth, sequencer, screen and effects in `firmware/src/dinghy.c`, and its changes to `platform.c`, `hal/fm1_lcd_hw.h`, `tests/host.c` and the docs | Presethead |
-| The app skeleton `firmware/src/dinghy.c` started from, the wiring `platform.c`, the host mode `tests/`, the docs | zvenson ([Dinghy](https://github.com/zvenson/dinghy)) |
+| `base/` (fm1-base, with felucca-bsp in `base/bsp/`): the platform (boot, the audio interrupt, USB, MIDI, the screen and fonts, the panel, storage, updates, safe mode, the screen reader, Bluetooth), the host simulator, the browser emulator, the build and install tools | Charles Vestal, Leo Kuroshita (Hügelton Instruments) and their contributors; MPL-2.0 (see `base/LICENSING.md`) |
+| `app/app.c`: the formant synth, sequencer, screen and effects | Presethead; it grew from the app skeleton of [Dinghy](https://github.com/zvenson/dinghy) by zvenson (GPL-3.0-only) |
+| `app/larynx_mul.h`, `app/fm1.toml`, `app/words.tsv`, `app/tests/`, `build.sh`, `tests/`, the docs | Presethead |
+| `app/app.h` | from fm1-base's template (Charles Vestal, MPL-2.0), with FMLarynx's changes (Presethead); stays MPL-2.0 |
+| The formant filter's design | follows [MouthTowel](https://github.com/nickb808-dev/er301-MouthTowel) by nickb808-dev (the design, not its code) |
+
+What the move to fm1-base dropped (fm1-base and felucca-bsp have their own): Dinghy's platform (`firmware/hal/`,
+`firmware/loader/`, `crt0.S`, `app.ld`, and in `firmware/src/` `platform.c`, `usb.c`, `ota.c`, `recovery.c`, `lcd.c`,
+`gfx.c`, `libc.c`, `bootguard.h`, `uac_fir.h`), its tools (`tools/`), its host mode (`tests/host.c`), its docs
+(`docs/API.md`, `MAKE-IT-YOURS.md`, `RULES.md`) and the Dinghy logo.
 
 ## Third-party material
 
 | What | Licence | Where |
 | --- | --- | --- |
-| Terminus font 8x16 (ter-u16n), rendered into `firmware/gen/felucca_font.h` | SIL OFL 1.1 | `assets/fonts/Terminus-LICENSE.txt` |
-| JieLi AC79 SDK: `uboot.boot`, `cfg_tool.bin`, `eq_cfg_hw.bin` are read from your SDK checkout at build time and placed in the package; no SDK files are in this tree | Apache-2.0 | <https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK> |
-
-## The logo
-
-`assets/logo.svg` / `logo.png` carry the designburg signet: Copyright (C) designburg, all rights reserved, not under
-the GPL. It marks Dinghy itself; a fork uses its own logo.
+| Terminus font, rendered by fm1-base's `tools/gen_font.py` at build time | SIL OFL 1.1 | `base/assets/fonts/Terminus-LICENSE.txt` |
+| JieLi AC79 SDK: the files the package needs are read from your SDK checkout at build time; no SDK files are in this tree | Apache-2.0 | <https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK> |
 
 ## Trademarks
 
