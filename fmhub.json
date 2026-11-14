@@ -1,8 +1,8 @@
 {
-  "what": "A throaty talking formant synth with a 303-style pattern sequencer: a saw wave through a three-formant vowel filter with an envelope, a resonant low-pass, drive and ping-pong delay. 16 steps with vowels, accent and slide per step, a pattern randomizer and 16 stored patterns.",
+  "what": "A throaty talking formant synth with a 303-style sequencer: a saw wave through a three-formant vowel filter, resonant low-pass, drive and ping-pong delay. 16 steps with vowels, accent and slide, a pattern randomizer, 16 stored patterns, Bluetooth MIDI and tight clock sync.",
   "author": "Presethead",
   "kinds": "synth",
   "play": "https://ejtb76.github.io/FMLarynx/emu/",
-  "image": "app/site/img/screen.png",
+  "image": "assets/splash.png",
   "color": "#E84058"
 }
