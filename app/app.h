@@ -20,7 +20,9 @@ int app_host_cmd(const char *cmd, const char *a, const char *b, const char *c, c
 #define APP_CANVAS_PX (240u * 114u)      /* the biggest strip drawn at once: the throat, 240 x 114 */
 #define APP_TICK                         /* app_tick: the internal MIDI clock, out to USB and Bluetooth, 1 kHz */
 #define APP_BTDEV                        /* Bluetooth MIDI devices (lib/btdev.h): the connections page (EDIT) */
-#define APP_USB_HOST_NAME                /* the USB device hosted, by its own name: HOST TO AMENITY */
+#define APP_LOG                          /* the clock's readout (fm1_remote.py log): app_log, app.c */
+void app_log(void (*line)(const char *t));
+#define APP_USB_HOST_NAME               /* the USB device hosted, by its own name: HOST TO AMENITY */
 
 /* the store: the app's objects, the panel calibration (the platform's) and Bluetooth's address and pairing among
  * them, and their flash offsets */

@@ -54,6 +54,8 @@ enum { WIDE_PULSES = 24, MID_PULSES = 24 * 8, FAR_PULSES = 6 };
 #define CLOCK_LEAN_K 0.03125f    /* its averaging, per pulse (about 32) */
 #endif
 
+/* the readout (app_log): what the loop did since the last read */
+volatile struct larynx_clock_diag larynx_clock_diag;
 static struct larynx_follow pub;
 static uint32_t pulse, first_t, last_t, source;
 static uint32_t t1;              /* the time predicted for the next pulse: t1 + t1_frac */
@@ -199,9 +201,14 @@ void larynx_midi_realtime(unsigned status, unsigned from, uint32_t t)
         publish(t, 0.0f);
         return;
     }
-    if (state == CLOCK_OFF || from != source) return;
+    if (from != source || !starts) return;
     if (status == 0xfcU) {
+        /* Stop from the input that sent the Start, even when its clock was lost meanwhile (the app plays on, on
+         * its own clock, after half a second without pulses): it stops with the sender. (Not Amenity's: there a
+         * lost clock ignored the Stop.) The time read keeps the state up for the half second, for the audio
+         * interrupt to see it */
         state = CLOCK_STOPPED;
+        last_t = t;
         publish(pub.t0, pub.t0_frac);
         return;
     }
@@ -229,6 +236,7 @@ static void take(uint32_t t)
     ++pulse;
     float e = (float)(int32_t)(t - t1) - t1_frac;
     if (e > per * FAR_PULSES || e < -per * FAR_PULSES) {
+        larynx_clock_diag.far++;
         restart_at(t);           /* far out: start again from this pulse */
         return;
     }
@@ -261,6 +269,10 @@ int larynx_clock(unsigned *bpm_x10, uint32_t now)
 {
     if (pending) flush();
     if (state != CLOCK_OFF && (int32_t)(now - last_t) > (int32_t)(LARYNX_TICK_HZ / 2U)) {
+        if (state == CLOCK_RUNNING || state == CLOCK_ARMED) {   /* (the readout: a clock followed, lost) */
+            larynx_clock_diag.lost++;
+            larynx_clock_diag.lost_ms = (now - last_t) / (LARYNX_TICK_HZ / 1000U);
+        }
         state = CLOCK_OFF;       /* half a second without pulses (signed: a stamp may be a little after now) */
         publish(pub.t0, pub.t0_frac);
     }

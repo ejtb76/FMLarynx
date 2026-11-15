@@ -32,4 +32,9 @@ float larynx_clock_period(void);
 /* the app's tempo (BPM x 10): the starting guess when nothing has been timed before a Start */
 unsigned larynx_tempo_x10(void);
 
+/* the readout (the app's app_log, tools fm1_remote.py log): a clock followed and lost (half a second without pulses)
+ * and how long it had been, the loop started again far out (over six pulses), since the last read */
+struct larynx_clock_diag { uint32_t lost, lost_ms, far; };
+extern volatile struct larynx_clock_diag larynx_clock_diag;
+
 #endif

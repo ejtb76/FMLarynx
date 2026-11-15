@@ -1150,7 +1150,7 @@ static void speak(void)                         /* a screen reader that starts l
  *         steps in between are skipped, not played at once. */
 #define HEARD_TICKS ((uint32_t)((uint64_t)APP_BLOCK * PLAT_TICKS_PER_US * 1000000u / 44100u))
 #define TICKS_PER_FRAME ((float)LARYNX_TICK_HZ / 44100.0f)
-#define INT_PULSE 2646000u                      /* ours: a pulse is 44100 x 60 (frames x BPM x 24) */
+#define INT_PULSE 26460000u                     /* ours: a pulse is 44100 x 60 x 10 (frames x BPM x 10 x 24) */
 enum { LOCK_FAR = 6, MAX_PULSES = 48 };         /* (MAX_PULSES: a block plays at most these) */
 enum { SQ_NONE, SQ_START, SQ_STOP };
 
@@ -1161,9 +1161,13 @@ static volatile uint8_t sq_req;                 /* main loop asks the audio inte
 static volatile uint8_t clock_ext;              /* tick: an outside clock is followed (larynx_clock) */
 static volatile uint16_t clock_bpm_x10;         /* tick: its tempo as the loop found it (BPM x 10) */
 static uint32_t clk_count, clk_first;           /* audio interrupt: pulses since the last step; the next plays step 1 */
-static uint32_t int_acc;                        /* ours: frames x BPM x 24 into the pulse */
+static uint32_t int_acc;                        /* ours: frames x BPM x 10 x 24 into the pulse */
+static volatile uint32_t int_hold10;            /* ours plays on at an outside clock's tempo (BPM x 10; 0: at set.bpm) .. */
+static int32_t int_hold_bpm;                    /* .. until set.bpm moves from this, or PLAY / Stop / a Start */
 static uint32_t ext_k;                          /* outside: the next pulse to play, counted from the Start's first */
 static uint8_t int_run, seen_start, was_state;  /* ours runs (and sends); the last Start seen; the loop's last state */
+static uint8_t ext_ran;                         /* the outside clock has run (pulses) since its Start: only then does
+                                                  * ours play on when it goes */
 
 unsigned larynx_tempo_x10(void) { return (unsigned)set.bpm * 10u; }
 
@@ -1229,6 +1233,7 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
         if (int_run) clock_out(0xFCu, now);     /* ours gives way */
         int_run = 0;
         ext_k = 0;
+        ext_ran = 0;
         if (!f.resume) {                        /* Start: step 1 at the first pulse */
             seq_halt();
             sq_step = 0;
@@ -1246,6 +1251,7 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
         sq_req = SQ_NONE;
         if (req == SQ_START) {                  /* PLAY: step 1, on ours unless one comes from outside */
             sq_running = 1;
+            ext_ran = 1;                        /* (asked to play: ours plays on if an outside one never comes) */
             sq_step = 0;
             clk_first = 1;
             if (!follow) {
@@ -1259,17 +1265,33 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
             sq_running = 0;
             seq_halt();
         }
+        int_hold10 = 0;                         /* (PLAY or its Stop: set.bpm again) */
     }
-    if (!sq_running || follow) int_run = 0;
-    else if (!int_run) {                        /* the outside clock went (no Stop): ours plays on, no Start */
+    if (f.state == CLOCK_RUNNING)
+        ext_ran = 1;
+    if (!sq_running || follow) {
+        int_run = 0;
+        int_hold10 = 0;                         /* (stopped, or an outside clock again: not held) */
+    } else if (!int_run && !ext_ran && seen_start) {   /* a Start that no pulse ever followed (one a computer sends
+                                                  * opening the port, at power-on): nothing to play on from */
+        sq_running = 0;
+        seq_halt();
+    } else if (!int_run) {                      /* the outside clock went (no Stop): ours plays on, no Start, at the
+                                                  * tempo it had (as the loop found it), so the steps keep in time */
+        uint32_t t10 = f.per > 0.0f ? (uint32_t)(6.0e8f / f.per + 0.5f) : 0u;
         int_run = 1;
         int_acc = 0;
+        int_hold10 = t10 >= 200u && t10 <= 6000u ? t10 : 0u;
+        int_hold_bpm = set.bpm;
     }
+    if (int_hold10 && set.bpm != int_hold_bpm)
+        int_hold10 = 0;                         /* the tempo turned meanwhile: that, as asked */
 
     while (done < n) {                          /* render up to each pulse, play it, render on */
         uint32_t at = n;
         if (int_run) {
-            uint32_t inc = set.bpm ? (uint32_t)set.bpm * 24u : 24u;
+            uint32_t t10 = int_hold10 ? int_hold10 : set.bpm ? (uint32_t)set.bpm * 10u : 10u;
+            uint32_t inc = t10 * 24u;
             uint32_t s = int_acc >= INT_PULSE ? 0u : (INT_PULSE - int_acc + inc - 1u) / inc;
             if (done + s < n) at = done + s;
             int_acc += (at - done) * inc;
@@ -1310,6 +1332,29 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
 #endif
 }
 
+/* The clock's readout (app_log: fm1_remote.py log), since the last read: what came in, the longest the tick went
+ * between two pulses read, how far a pulse's stamp was before or after its reading (Bluetooth's: the sender's time),
+ * the most messages one tick read. With larynx_clock_diag: was a clock lost because nothing came, or because the
+ * stamps went astray. */
+#define STAMP_OFF ((int32_t)(120 * 24000))       /* 120 ms (the platform's own BLE_TIME_LATE_MS is 100), in ticks */
+static volatile struct { uint32_t f8, fa, fb, fc, gap, late, early, burst, fixed, fa_from, fa_ms, fc_from, fc_ms; } tdiag;
+static uint32_t tdiag_prev;                     /* tick: when the last pulse was read */
+static void tdiag_pulse(uint32_t st, uint32_t stamp, uint32_t read)   /* tick */
+{
+    int32_t d = (int32_t)(read - stamp) / 24000;   /* ms: + the stamp before the reading */
+    if (st == 0xFAu) tdiag.fa++;
+    else if (st == 0xFBu) tdiag.fb++;
+    else if (st == 0xFCu) tdiag.fc++;
+    if (st != 0xF8u)
+        return;
+    tdiag.f8++;
+    if (tdiag_prev && (read - tdiag_prev) / 24000u > tdiag.gap)
+        tdiag.gap = (read - tdiag_prev) / 24000u;
+    tdiag_prev = read;
+    if (d > (int32_t)tdiag.late) tdiag.late = (uint32_t)d;
+    if (-d > (int32_t)tdiag.early) tdiag.early = (uint32_t)-d;
+}
+
 /* The tick (1 kHz, the timer interrupt, right after the USB poll): MIDI in, stamped as Amenity's (and read here, not
  * in the main loop, so the screen never holds it up). MIDI THRU, as a daisy chain: everything that comes in (notes,
  * CC, clock, Start / Stop; not SysEx, the updater's) goes on at once to the other outs, never back where it came from:
@@ -1318,24 +1363,41 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
  * Then what the audio interrupt sends, when it is heard. */
 void app_tick(void)
 {
-    uint32_t pkt, now = now24();
+    uint32_t pkt, now = now24(), n = 0;
     unsigned bpm;
     int port;
     while (plat_midi_in(&pkt, &port)) {
         uint32_t st = (pkt >> 8) & 0xFFu, d1 = (pkt >> 16) & 0x7Fu, d2 = (pkt >> 24) & 0x7Fu, cin = pkt & 0xFu;
         uint32_t from = plat_midi_in_from();
         (void)port;
+        n++;
         if (cin >= 2u && (cin < 4u || cin > 7u) && !(st == 0xF8u && !clock_ext && sq_running))
             plat_midi_send(pkt & ~0xF0u, (TO_USB | TO_BLE) & ~from);   /* (cable 0: the jack's come in as 1) */
-        if (st == 0xF8u || st == 0xFAu || st == 0xFBu || st == 0xFCu)
+        if (st == 0xF8u || st == 0xFAu || st == 0xFBu || st == 0xFCu) {
 #ifdef PLAT_HOST
-            larynx_midi_realtime(st, from, now);
+            uint32_t stamp = now;
 #else
-            larynx_midi_realtime(st, from, plat_midi_in_t24());
+            uint32_t stamp = plat_midi_in_t24();
 #endif
-        else if ((st & 0xF0u) == 0x90u && d2) noteq_put(&midiq, d1, d2);   /* any channel */
+            uint32_t read = now24();
+            int32_t age = (int32_t)(read - stamp);
+            tdiag_pulse(st, stamp, read);
+            if (st == 0xFAu) { tdiag.fa_from = from; tdiag.fa_ms = plat_ms(); }   /* (who, when: TO_* / ms) */
+            if (st == 0xFCu) { tdiag.fc_from = from; tdiag.fc_ms = plat_ms(); }
+            /* A stamp more than STAMP_OFF from its reading is wrong, not late: Bluetooth's sender times are mapped onto
+             * ours by the platform (bt/ble/ble_time.c), and one message seemingly sent earlier than any before moves
+             * that mapping for all that follow (seen: 1.5 s, on an FM-1 following Amenity; the loop took it for half a
+             * second without pulses and let the clock go). Such a message is taken when it was read: a beat a little
+             * less even at worst, never a clock lost */
+            if (age > STAMP_OFF || age < -STAMP_OFF) {
+                stamp = read;
+                tdiag.fixed++;
+            }
+            larynx_midi_realtime(st, from, stamp);
+        } else if ((st & 0xF0u) == 0x90u && d2) noteq_put(&midiq, d1, d2);   /* any channel */
         else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) noteq_put(&midiq, d1, 0);
     }
+    if (n > tdiag.burst) tdiag.burst = n;
     now = now24();                              /* (after the reads: their stamps may be later than the tick's start) */
     clock_ext = (uint8_t)larynx_clock(&bpm, now);
     clock_bpm_x10 = (uint16_t)(bpm > 65535u ? 65535u : bpm);
@@ -1817,9 +1879,11 @@ static void pass(void)
         {                                        /* the delay time in frames, from the tempo the sequence plays at:
                                                    * ours, or while following an outside clock the tempo the loop
                                                    * found (larynx_clock.c, to 0.1 BPM) */
-            uint32_t bx10 = (uint32_t)set.bpm * 10u, ext = clock_bpm_x10, len;
+            uint32_t bx10 = (uint32_t)set.bpm * 10u, ext = clock_bpm_x10, hold = int_hold10, len;
             if (clock_ext && ext >= 200u && ext <= 6000u)
                 bx10 = ext;
+            else if (hold)                       /* a lost clock's tempo, ours playing on at it */
+                bx10 = hold;
             len = DLY_16THS[par.dlydiv] * 6615000u / bx10;   /* 16ths * 15 s/bpm * 44.1 k */
             len = len < DLY_N - 1u ? len : DLY_N - 1u;   /* slow tempos: as long as the line goes */
             if (len > dly_len + 1u || len + 1u < dly_len)   /* (a frame either way: the loop's last digit) */
@@ -2006,6 +2070,48 @@ void app_frame(void)
     pass();
     link_poll();
     speak();
+}
+
+/* ---- the clock's readout (APP_LOG): fm1_remote.py log prints these lines after the platform's; read, they start
+ * again from 0 */
+static void log_kv(char *b, const char *k, uint32_t v)   /* " K V" onto b */
+{
+    char t[12];
+    text_cat(b, " ");
+    text_cat(b, k);
+    text_cat(b, " ");
+    int_text(t, (int32_t)v);
+    text_cat(b, t);
+}
+void app_log(void (*line)(const char *t))
+{
+    char b[48];
+    b[0] = 0;
+    text_cat(b, "clk in");
+    log_kv(b, "F8", tdiag.f8); log_kv(b, "FA", tdiag.fa); log_kv(b, "FB", tdiag.fb); log_kv(b, "FC", tdiag.fc);
+    line(b);
+    b[0] = 0;
+    text_cat(b, "clk ms");
+    log_kv(b, "gap", tdiag.gap); log_kv(b, "late", tdiag.late); log_kv(b, "early", tdiag.early);
+    line(b);
+    b[0] = 0;
+    text_cat(b, "clk");
+    log_kv(b, "lost", larynx_clock_diag.lost); log_kv(b, "at", larynx_clock_diag.lost_ms);
+    log_kv(b, "far", larynx_clock_diag.far); log_kv(b, "burst", tdiag.burst); log_kv(b, "fix", tdiag.fixed);
+    line(b);
+    b[0] = 0;                                    /* the last Start and Stop: from (1 USB, 2 the computer's Bluetooth,
+                                                   * 8 a device's, 0 the jack) and when (ms since power-on) */
+    text_cat(b, "clk FA");
+    log_kv(b, "src", tdiag.fa_from); log_kv(b, "ms", tdiag.fa_ms);
+    text_cat(b, " FC");
+    log_kv(b, "src", tdiag.fc_from); log_kv(b, "ms", tdiag.fc_ms);
+    line(b);
+    b[0] = 0;
+    text_cat(b, "clk now");
+    log_kv(b, "ext", clock_ext); log_kv(b, "run", (uint32_t)sq_running); log_kv(b, "bpm10", clock_bpm_x10);
+    line(b);
+    tdiag.f8 = tdiag.fa = tdiag.fb = tdiag.fc = tdiag.gap = tdiag.late = tdiag.early = tdiag.burst = tdiag.fixed = 0;
+    larynx_clock_diag.lost = larynx_clock_diag.lost_ms = larynx_clock_diag.far = 0;
 }
 
 /* ---- the splash (APP_SPLASH), as Amenity's: the picture (assets/splash.png, drawn by tools/splash_art.py, coded by

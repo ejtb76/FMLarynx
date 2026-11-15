@@ -37,7 +37,13 @@ clock 7
 expect step 2
 wait 1200
 expect step >5
-tap PLAY
+# .. and a Stop from the sender still stops it, though its clock was lost meanwhile
+midi FC 00 00
+wait 20
+expect playing 0
+expect note -1
+# (the sender's Stop holds for half a second, its tempo with it)
+wait 600
 # the delay follows the tempo the sequence plays at: ours (120 BPM, 3/16: 16537 frames), an outside clock's as
 # followed (25 ms a pulse: 100 BPM, 19845 frames), ours again once that clock has gone
 expect delay >16535
@@ -50,3 +56,30 @@ midi FC 00 00
 wait 1000
 expect delay >16535
 expect delay <16539
+# a clock lost while it leads: ours plays on at its tempo (100 BPM here, not our 120), the delay with it (19845
+# frames); the sender's Stop stops it, and set.bpm is ours again after
+midi FA 00 00
+clock 30 25
+wait 1000
+expect playing 1
+expect delay >19800
+expect delay <19900
+midi FC 00 00
+wait 700
+expect playing 0
+expect delay >16535
+expect delay <16539
+# a Start that no pulse follows (a computer opening the port at power-on sends one): after the half second nothing
+# plays; PLAY pressed meanwhile does play, on ours
+wait 1000
+midi FA 00 00
+wait 1000
+expect playing 0
+expect note -1
+midi FA 00 00
+tap PLAY
+wait 1000
+expect playing 1
+tap PLAY
+wait 100
+expect playing 0
